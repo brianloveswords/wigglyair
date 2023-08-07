@@ -1,32 +1,18 @@
-use crate::types::CreateUser;
-use crate::types::User;
-use axum::http::StatusCode;
+use crate::types::DebugResponse;
+use crate::types::SharedState;
+use axum::extract::State;
 use axum::Json;
 
 // basic handler that responds with a static string
 #[tracing::instrument]
-pub async fn root() -> &'static str {
+pub async fn root() -> &'static [u8] {
     tracing::info!("handling request");
-    "Hello, World!"
+    "Hello, World!".as_bytes()
 }
 
-#[tracing::instrument]
-pub async fn debug() -> &'static str {
-    tracing::info!("handling request");
-    "Hello, Debug!"
-}
-
-#[tracing::instrument]
-pub async fn create_user(Json(payload): Json<CreateUser>) -> (StatusCode, Json<User>) {
-    // insert application logic here
-    let user = User {
-        id: 42,
-        username: payload.username,
-    };
-
-    tracing::info!("created user {:?}", user);
-
-    // this will be converted into a JSON response
-    // with a status code of `201 Created`
-    (StatusCode::CREATED, Json(user))
+#[tracing::instrument(skip(state))]
+pub async fn debug(State(state): State<SharedState>) -> Json<DebugResponse> {
+    tracing::info!("state {:?}", state);
+    let paths = state.settings.music.paths.clone();
+    Json(DebugResponse { paths })
 }

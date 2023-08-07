@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 use config::{Config, ConfigError};
 use serde::Deserialize;
 use tracing::subscriber::set_global_default;
@@ -6,14 +8,28 @@ use tracing_subscriber::{prelude::*, EnvFilter};
 
 #[derive(Debug, Deserialize)]
 pub struct Settings {
-    pub application: ApplicationSettings,
-    pub music_roots: Vec<String>,
+    pub server: ServerSettings,
+    pub music: MusicSettings,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct MusicSettings {
+    pub paths: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ApplicationSettings {
+pub struct ServerSettings {
     pub port: u16,
     pub host: String,
+}
+impl ServerSettings {
+    pub fn addr_string(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
+    pub fn addr(&self) -> SocketAddr {
+        self.addr_string().parse().expect("Failed to parse address")
+    }
 }
 
 pub fn setup_tracing(name: String) {

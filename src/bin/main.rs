@@ -1,26 +1,21 @@
-use axum::{
-    routing::{get, post},
-    Router,
-};
-use std::net::SocketAddr;
-use wigglyair::configuration;
-use wigglyair::routes;
+use std::sync::Arc;
+
+use axum::{routing::get, Router};
+use wigglyair::{configuration, routes, types::AppState};
 
 #[tokio::main]
 async fn main() {
     configuration::setup_tracing("wigglyair".into());
+    let settings = configuration::get_configuration().expect("Failed to read configuration.");
+    let addr = settings.server.addr();
+
+    let state = AppState { settings };
 
     // build our application with a route
     let app = Router::new()
         .route("/", get(routes::root))
-        .route("/debug", get(routes::debug));
-
-    let addr = {
-        let settings = configuration::get_configuration().expect("Failed to read configuration.");
-        let host = settings.application.host;
-        let port = settings.application.port;
-        format!("{host}:{port}").parse::<SocketAddr>().unwrap()
-    };
+        .route("/debug", get(routes::debug))
+        .with_state(Arc::new(state));
 
     tracing::info!("listening on {addr}");
     axum::Server::bind(&addr)

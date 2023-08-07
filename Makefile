@@ -13,5 +13,12 @@ install-to-nas : ${RELEASE_TARGET}
 ${RELEASE_TARGET} : src/main.rs
 	cross build --release --target ${NAS_TARGET}
 
+debug :
+	cargo build
+
+release :
+	cargo build --release
+
 run :
 	cargo run
+

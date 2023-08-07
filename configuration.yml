@@ -1,5 +1,6 @@
-application:
+server:
     host: 0.0.0.0
     port: 3000
-music_roots:
-    - /Volumes/music
+music:
+    paths:
+        - /Volumes/music
