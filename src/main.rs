@@ -29,7 +29,7 @@ async fn main() {
 
     // run our app with hyper `axum::Server` is a re-export of `hyper::Server`
     // so you can pass in any hyper settings here
-    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    let addr = SocketAddr::from(([0, 0, 0, 0], 3000));
     tracing::info!("listening on {addr}");
     axum::Server::bind(&addr)
         .serve(app.into_make_service())
