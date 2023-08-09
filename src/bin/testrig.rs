@@ -1,7 +1,7 @@
 use clap::Parser;
-use std::io::{BufWriter, Write};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use walkdir::WalkDir;
 use wigglyair::metadata::TrackMetadata;
@@ -32,16 +32,17 @@ async fn main() {
 
     // open a BufWriter wrapped config file
     let cache_path = Path::new(&cli.cache.unwrap_or("cache.json".into())).to_path_buf();
-    let cache_file = std::fs::OpenOptions::new()
+    let cache_file = tokio::fs::OpenOptions::new()
         .create(true)
         .write(true)
         .open(&cache_path)
+        .await
         .expect("Failed to open cache file");
 
-    let cache_file = Arc::new(Mutex::new(BufWriter::new(cache_file)));
+    let cache_file = Arc::new(Mutex::new(cache_file));
 
-    let cache_map = metadata::read_cached_metadata(&cache_path).expect("Failed to read cache file");
-    let cache_map = Arc::new(cache_map);
+    let cache_map =
+        Arc::new(metadata::read_cached_metadata(&cache_path).expect("Failed to read cache file"));
 
     let tasks = WalkDir::new(cli.root)
         .into_iter()
@@ -54,12 +55,24 @@ async fn main() {
             let cache_file = Arc::clone(&cache_file);
             let cache_map = Arc::clone(&cache_map);
             tokio::spawn(async move {
-                // let mut cache_file = cache_file.lock().await;
                 let meta = TrackMetadata::read_from_path(&path, &cache_map)
                     .await
                     .expect(format!("Failed to read tags from {}", &path.display()).as_ref());
-                // let meta = serde_json::to_string(&meta).expect("Failed to serialize metadata");
-                // writeln!(*cache_file, "{}", meta).expect("Failed to write to cache file");
+
+                let ndjson = {
+                    let mut ndjson =
+                        serde_json::to_string(&meta).expect("Failed to serialize metadata");
+                    ndjson.push('\n');
+                    ndjson
+                };
+
+                {
+                    let mut cache_file = cache_file.lock().await;
+                    cache_file
+                        .write_all(ndjson.as_bytes())
+                        .await
+                        .expect("Failed to write to cache file");
+                }
             })
         });
 
