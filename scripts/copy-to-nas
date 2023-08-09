@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+function main() {
+    if [ -z "$NAS_HOST" ]; then
+        echo "NAS_HOST is not set"
+        exit 1
+    fi
+
+    if [ -z "$1" ]; then
+        echo "1st argument is not set"
+        exit 1
+    fi
+
+    set +u
+    scp -O target/x86_64-unknown-linux-gnu/release/$1 $NAS_HOST:$2
+}
+
+main "$@"

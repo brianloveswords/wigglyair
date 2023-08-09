@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use std::{net::SocketAddr, path::Path};
 
 use config::{Config, ConfigError};
 use serde::Deserialize;
@@ -33,8 +33,13 @@ impl ServerSettings {
 }
 
 pub fn setup_tracing(name: String) {
+    let logfile = format!("{}.log", &name);
+    let logfile = Path::new(&logfile);
+    let logdir = Path::new("logs");
+
+    let file_appender = tracing_appender::rolling::daily(logdir, logfile);
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = BunyanFormattingLayer::new(name, std::io::stdout);
+    let fmt_layer = BunyanFormattingLayer::new(name, std::io::stderr.and(file_appender));
 
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)
