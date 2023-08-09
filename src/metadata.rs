@@ -1,26 +1,12 @@
-use chrono::DateTime;
+use chrono::{DateTime, SecondsFormat, Utc};
 use metaflac::block::VorbisComment;
 use metaflac::Tag;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fs::Metadata;
+use std::io;
 use std::path::PathBuf;
 use thiserror::Error;
-
-fn stat_file(path: &PathBuf) -> Result<std::fs::Metadata, TrackMetadataError> {
-    std::fs::metadata(path).map_err(|e| TrackMetadataError::IoFailed {
-        path: path.clone(),
-        error: e,
-    })
-}
-
-fn last_modified(path: &PathBuf) -> Result<DateTime<chrono::Utc>, TrackMetadataError> {
-    let stat = stat_file(path)?;
-    let last_modified = stat.modified().map_err(|e| TrackMetadataError::IoFailed {
-        path: path.clone(),
-        error: e,
-    })?;
-    Ok(DateTime::from(last_modified))
-}
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct TrackMetadata {
@@ -91,70 +77,32 @@ pub enum TrackMetadataError {
 
 pub type FileMetadataMap = BTreeMap<String, TrackMetadata>;
 
-#[tracing::instrument]
-pub fn read_cached_metadata(path: &PathBuf) -> Result<FileMetadataMap, TrackMetadataError> {
-    if !path.exists() {
-        tracing::info!("No cache file found, starting from scratch");
-        return Ok(FileMetadataMap::new());
-    }
-
-    let contents = std::fs::read_to_string(&path).expect("Failed to read cache file");
-
-    let mut map = FileMetadataMap::new();
-    // split cache contents on newlines and parse each line as a TrackMetadata,
-    // then insert it into the cache map
-    contents.lines().for_each(|line| {
-        if line.trim().is_empty() {
-            return;
-        }
-
-        let meta: TrackMetadata =
-            serde_json::from_str(line).expect("Failed to deserialize cache file");
-
-        map.insert(meta.path.to_string_lossy().into(), meta);
-    });
-
-    Ok(map)
-}
-
-#[tracing::instrument(name = "Tag::read_from_path")]
-fn read_tag_from_path(path: &PathBuf) -> Result<Tag, TrackMetadataError> {
-    Tag::read_from_path(&path).map_err(|e| TrackMetadataError::ReadFailed(e))
-}
-
-#[tracing::instrument(skip(tag))]
-fn read_track_length(tag: &Tag) -> Option<u32> {
-    let si = tag.get_streaminfo()?;
-    // calculate length of track in seconds
-    Some((si.total_samples / si.sample_rate as u64) as u32)
-}
-
-#[tracing::instrument(skip(tag))]
-fn read_comments(tag: &Tag) -> Option<VorbisComment> {
-    tag.vorbis_comments().cloned()
-}
-
 impl TrackMetadata {
     #[tracing::instrument(name = "TrackMetadata::read_from_path")]
-    pub fn read_from_path(
+    pub async fn read_from_path(
         path: &PathBuf,
         cache: &FileMetadataMap,
     ) -> Result<Self, TrackMetadataError> {
-        let path_as_key = path.to_string_lossy().to_string();
-        let last_modified = last_modified(path)?.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let file_size: u64 = stat_file(path)?.len();
+        let stat = stat_file(path).await?;
+        let last_modified = last_modified(&stat).map_err(|e| TrackMetadataError::IoFailed {
+            path: path.clone(),
+            error: e,
+        })?;
 
-        let cached_meta = cache
-            .get(&path_as_key)
-            .filter(|m| m.last_modified <= last_modified);
+        let cached_meta = {
+            let path_as_key = path.to_string_lossy().to_string();
+            cache
+                .get(&path_as_key)
+                .filter(|m| m.last_modified <= last_modified)
+        };
 
         if let Some(meta) = cached_meta {
             tracing::info!("Using cached metadata for {}", path.display());
             return Ok(meta.clone());
         }
 
+        let file_size: u64 = stat.len();
         let tag = read_tag_from_path(path)?;
-
         let comments =
             read_comments(&tag).ok_or(TrackMetadataError::MissingComment { path: path.clone() })?;
 
@@ -198,4 +146,61 @@ impl TrackMetadata {
             track,
         })
     }
+}
+
+#[tracing::instrument]
+pub fn read_cached_metadata(path: &PathBuf) -> Result<FileMetadataMap, TrackMetadataError> {
+    if !path.exists() {
+        tracing::info!("No cache file found, starting from scratch");
+        return Ok(FileMetadataMap::new());
+    }
+
+    let contents = std::fs::read_to_string(&path).expect("Failed to read cache file");
+
+    let mut map = FileMetadataMap::new();
+    // split cache contents on newlines and parse each line as a TrackMetadata,
+    // then insert it into the cache map
+    contents.lines().for_each(|line| {
+        if line.trim().is_empty() {
+            return;
+        }
+
+        let meta: TrackMetadata =
+            serde_json::from_str(line).expect("Failed to deserialize cache file");
+
+        map.insert(meta.path.to_string_lossy().into(), meta);
+    });
+
+    Ok(map)
+}
+
+#[tracing::instrument(name = "Tag::read_from_path")]
+fn read_tag_from_path(path: &PathBuf) -> Result<Tag, TrackMetadataError> {
+    Tag::read_from_path(&path).map_err(|e| TrackMetadataError::ReadFailed(e))
+}
+
+#[tracing::instrument(skip(tag))]
+fn read_track_length(tag: &Tag) -> Option<u32> {
+    let si = tag.get_streaminfo()?;
+    // calculate length of track in seconds
+    Some((si.total_samples / si.sample_rate as u64) as u32)
+}
+
+#[tracing::instrument(skip(tag))]
+fn read_comments(tag: &Tag) -> Option<VorbisComment> {
+    tag.vorbis_comments().cloned()
+}
+
+async fn stat_file(path: &PathBuf) -> Result<std::fs::Metadata, TrackMetadataError> {
+    tokio::fs::metadata(path)
+        .await
+        .map_err(|e| TrackMetadataError::IoFailed {
+            path: path.clone(),
+            error: e,
+        })
+}
+
+fn last_modified(stat: &Metadata) -> Result<String, io::Error> {
+    stat.modified()
+        .map(|t| DateTime::<Utc>::from(t).to_rfc3339_opts(SecondsFormat::Secs, true))
 }
