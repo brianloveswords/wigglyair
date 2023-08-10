@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+function main() {
+  if [[ $# -eq 0 ]]; then
+    echo "Usage: $0 <migration name>"
+    exit 1
+  fi
+
+  PREFIX=$(date +"%Y%m%d%H%M%S")
+  OUTPUT_FILE=migrations/$PREFIX-"${@}".sql
+  touch "$OUTPUT_FILE"
+  echo $EDITOR "$OUTPUT_FILE"
+
+}
+
+main "${@}"
