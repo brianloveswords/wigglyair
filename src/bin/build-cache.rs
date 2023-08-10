@@ -20,13 +20,9 @@ struct Cli {
     root: String,
 }
 
-fn is_flac(e: &walkdir::DirEntry) -> bool {
-    e.file_type().is_file() && e.path().extension().unwrap_or_default() == "flac"
-}
-
 #[tokio::main]
 async fn main() {
-    configuration::setup_tracing("testrig".into());
+    configuration::setup_tracing("build-cache".into());
 
     let cli = Cli::parse();
 
@@ -79,4 +75,8 @@ async fn main() {
     for task in tasks {
         task.await.expect("Failed to join task");
     }
+}
+
+fn is_flac(e: &walkdir::DirEntry) -> bool {
+    e.file_type().is_file() && e.path().extension().unwrap_or_default() == "flac"
 }
