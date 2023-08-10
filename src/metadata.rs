@@ -148,32 +148,6 @@ impl TrackMetadata {
     }
 }
 
-#[tracing::instrument]
-pub fn read_cached_metadata(path: &PathBuf) -> Result<FileMetadataMap, TrackMetadataError> {
-    if !path.exists() {
-        tracing::info!("No cache file found, starting from scratch");
-        return Ok(FileMetadataMap::new());
-    }
-
-    let contents = std::fs::read_to_string(&path).expect("Failed to read cache file");
-
-    let mut map = FileMetadataMap::new();
-    // split cache contents on newlines and parse each line as a TrackMetadata,
-    // then insert it into the cache map
-    contents.lines().for_each(|line| {
-        if line.trim().is_empty() {
-            return;
-        }
-
-        let meta: TrackMetadata =
-            serde_json::from_str(line).expect("Failed to deserialize cache file");
-
-        map.insert(meta.path.to_string_lossy().into(), meta);
-    });
-
-    Ok(map)
-}
-
 #[tracing::instrument(name = "Tag::read_from_path")]
 fn read_tag_from_path(path: &PathBuf) -> Result<Tag, TrackMetadataError> {
     Tag::read_from_path(&path).map_err(|e| TrackMetadataError::ReadFailed(e))
