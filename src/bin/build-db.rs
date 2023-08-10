@@ -60,6 +60,7 @@ async fn main() {
         let track = TrackMetadata::from_path_with_stat(&path, &stat)
             .await
             .expect("Failed to get track");
+        tracing::info!("adding track: {}", track.debug_display());
         repo.add_track(&track);
     }
 }
