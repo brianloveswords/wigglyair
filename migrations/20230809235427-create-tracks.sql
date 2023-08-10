@@ -1,6 +1,5 @@
 CREATE TABLE tracks(
-    track_id TEXT PRIMARY KEY,
-    path BLOB NOT NULL,
+    path TEXT NOT NULL,
     last_modified TEXT NOT NULL,
     file_size INTEGER NOT NULL,
     track_length INTEGER NOT NULL,
