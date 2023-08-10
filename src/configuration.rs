@@ -39,7 +39,7 @@ pub fn setup_tracing(name: String) {
 
     let file_appender = tracing_appender::rolling::daily(logdir, logfile);
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = BunyanFormattingLayer::new(name, std::io::stderr.and(file_appender));
+    let fmt_layer = BunyanFormattingLayer::new(name, std::io::stdout.and(file_appender));
 
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)
