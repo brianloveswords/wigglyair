@@ -4,3 +4,5 @@ cache.json
 tmp
 *.backup
 *.db
+*.db-shm
+*.db-wal
