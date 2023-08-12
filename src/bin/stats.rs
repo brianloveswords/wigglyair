@@ -16,8 +16,9 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
+    let _guard = configuration::setup_tracing_async("testrig".into());
+
     let cli = Cli::parse();
-    configuration::setup_tracing("testrig".into());
 
     let db = AsyncDatabase::connect(DatabaseKind::parse(&cli.db)).await;
     let conn = Arc::new(db.conn);

@@ -21,7 +21,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
-    configuration::setup_tracing("build-db".into());
+    let _guard = configuration::setup_tracing_async("build-db".into());
 
     let cli = Cli::parse();
 

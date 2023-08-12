@@ -11,7 +11,7 @@ struct Cli {
 
 #[tokio::main]
 async fn main() {
-    configuration::setup_tracing("testrig".into());
+    let _guard = configuration::setup_tracing_async("testrig".into());
 
     let (tx, mut rx) = mpsc::channel(100);
 

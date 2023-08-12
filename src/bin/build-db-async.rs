@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::task;
 use tokio_rusqlite::Connection as AsyncConnection;
+use walkdir::DirEntry;
 use walkdir::WalkDir;
 use wigglyair::{
     self, configuration,
@@ -21,6 +22,9 @@ use wigglyair::{
 struct Cli {
     #[clap(short, long, help = "Limit the number of files to process")]
     limit: Option<usize>,
+
+    #[clap(long, help = "Filter files by pattern")]
+    filter: Option<String>,
 
     #[clap(help = "Path to db file")]
     db: String,
@@ -39,7 +43,7 @@ enum WriterMessage {
 
 #[tokio::main]
 async fn main() {
-    configuration::setup_tracing("build-db-async".into());
+    let _guard = configuration::setup_tracing_async("build-db-async".into());
 
     let cli = Cli::parse();
 
@@ -60,17 +64,12 @@ async fn main() {
         db
     };
 
-    // what does the analyzer look like?
-    // we need to set up a channel for the walker to spit pathbufs into
-    // we need the reader that's gonna loop on that channel and analyze the files
-    // we can use tokio to spawn tasks that will do the work
-
-    let (tx, mut rx) = mpsc::channel::<AnalyzerMessage>(64);
+    let (tx, mut rx) = mpsc::channel::<AnalyzerMessage>(512);
     let conn = Arc::new(db.conn);
 
-    let (writer_tx, mut writer_rx) = mpsc::channel::<WriterMessage>(64);
+    let (writer_tx, mut writer_rx) = mpsc::channel::<WriterMessage>(512);
     let conn1 = Arc::clone(&conn);
-    let t1 = task::spawn(async move {
+    task::spawn(async move {
         use AnalyzerMessage::*;
         tracing::info!("Starting analyzer");
         while let Some(msg) = rx.recv().await {
@@ -80,25 +79,8 @@ async fn main() {
         }
     });
 
-    // walk dir, spit files
-    let t2 = task::spawn(async move {
-        tracing::info!("Starting walker");
-        let paths = WalkDir::new(cli.root)
-            .into_iter()
-            .filter_map(|e| e.ok())
-            .filter(|e| is_flac(e))
-            .map(|e| e.into_path())
-            .take(cli.limit.unwrap_or(usize::MAX));
-
-        for path in paths {
-            if let Err(e) = tx.send(AnalyzerMessage::AnalyzeFile(path)).await {
-                tracing::error!("Failed to send path: {}", e)
-            }
-        }
-    });
-
     let conn1 = Arc::clone(&conn);
-    let t3 = task::spawn(async move {
+    task::spawn(async move {
         tracing::info!("Starting writer");
         let query = "
             INSERT INTO tracks (
@@ -156,9 +138,53 @@ async fn main() {
         }
     });
 
-    t1.await.unwrap();
-    t2.await.unwrap();
-    t3.await.unwrap();
+    // walk dir, spit files
+    tracing::info!("Starting walker");
+
+    let path_filter = path_filter_from_opt(cli.filter);
+
+    let paths = WalkDir::new(cli.root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| is_flac(e))
+        .filter(path_filter)
+        .map(|e| e.into_path())
+        .take(cli.limit.unwrap_or(usize::MAX));
+
+    for path in paths {
+        if let Err(e) = tx.send(AnalyzerMessage::AnalyzeFile(path)).await {
+            tracing::error!("Failed to send path: {}", e)
+        }
+    }
+}
+
+fn path_filter_from_opt(filter: Option<String>) -> Box<dyn Fn(&DirEntry) -> bool> {
+    match filter {
+        Some(filter) => Box::new(move |e: &DirEntry| {
+            fuzzy_match_string(&filter, e.path().to_string_lossy().to_string().as_str())
+        }),
+        None => Box::new(|_| true),
+    }
+}
+
+fn fuzzy_match_string(needle: &str, haystack: &str) -> bool {
+    let needle = needle.to_lowercase();
+    let haystack = haystack.to_lowercase();
+
+    let needle_words: Vec<Option<usize>> = needle
+        .split_whitespace()
+        .map(|word| haystack.find(word))
+        .collect();
+
+    let mut last_index: Option<usize> = None;
+    for word in needle_words {
+        match (word, last_index) {
+            (None, _) => return false,
+            (Some(index), Some(li)) if index < li => return false,
+            (Some(index), _) => last_index = Some(index),
+        }
+    }
+    true
 }
 
 async fn analyze_file(path: PathBuf, conn: &AsyncConnection, tx: &Sender<WriterMessage>) {
@@ -177,7 +203,7 @@ async fn analyze_file(path: PathBuf, conn: &AsyncConnection, tx: &Sender<WriterM
 
     let is_up_to_date: bool = {
         let path = Arc::clone(&path);
-        conn.call(move |conn| check_if_path_is_up_to_date(&path, &last_modified, conn))
+        conn.call(move |conn| check_path_is_up_to_date(&path, &last_modified, conn))
             .await
             .unwrap()
     };
@@ -204,7 +230,7 @@ async fn analyze_file(path: PathBuf, conn: &AsyncConnection, tx: &Sender<WriterM
         });
 }
 
-fn check_if_path_is_up_to_date(
+fn check_path_is_up_to_date(
     path: &PathBuf,
     last_modified: &String,
     conn: &Connection,

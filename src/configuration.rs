@@ -3,6 +3,7 @@ use std::{net::SocketAddr, path::Path};
 use config::{Config, ConfigError};
 use serde::Deserialize;
 use tracing::subscriber::set_global_default;
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_bunyan_formatter::BunyanFormattingLayer;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
@@ -32,20 +33,21 @@ impl ServerSettings {
     }
 }
 
-pub fn setup_tracing(name: String) {
+pub fn setup_tracing_async(name: String) -> WorkerGuard {
     let logfile = format!("{}.log", &name);
     let logfile = Path::new(&logfile);
     let logdir = Path::new("logs");
 
     let file_appender = tracing_appender::rolling::daily(logdir, logfile);
+    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = BunyanFormattingLayer::new(name, std::io::stdout.and(file_appender));
-
+    let fmt_layer = BunyanFormattingLayer::new(name, std::io::stdout.and(non_blocking));
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt_layer);
 
     set_global_default(subscriber).expect("Failed to set subscriber");
+    guard
 }
 
 pub fn get_configuration() -> Result<Settings, ConfigError> {
