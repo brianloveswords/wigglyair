@@ -1,4 +1,4 @@
-use std::sync::{mpsc, Arc, Mutex};
+use std::sync::mpsc;
 use std::{fs::File, path::Path};
 use std::{io, thread};
 
@@ -23,8 +23,7 @@ struct Cli {
 const SAMPLE_RATE: usize = 44100;
 const CHANNEL_COUNT: usize = 2;
 
-#[tokio::main]
-async fn main() {
+fn main() {
     // when this leaves scope the logs will be flushed
     let _guard = configuration::setup_tracing_async("play".into());
 
@@ -57,7 +56,7 @@ async fn main() {
     let mut sample_buf = None;
 
     // create channel for individual samples (interleaved format)
-    let (tx, rx) = mpsc::sync_channel::<f32>(SAMPLE_RATE / 5);
+    let (tx, rx) = mpsc::sync_channel::<f32>(SAMPLE_RATE * CHANNEL_COUNT * 30);
 
     // create channel for the sample rate of the first track
     let (rate_tx, rate_rx) = mpsc::sync_channel::<usize>(1);
