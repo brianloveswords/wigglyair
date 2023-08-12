@@ -34,7 +34,7 @@ enum WriterMessage {
 
 #[tokio::main]
 async fn main() {
-    configuration::setup_tracing("testrig".into());
+    configuration::setup_tracing("build-db-async".into());
 
     let cli = Cli::parse();
 
