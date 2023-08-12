@@ -1,9 +1,9 @@
-use std::sync::mpsc;
 use std::{fs::File, path::Path};
 use std::{io, thread};
 
 use audio_thread_priority::promote_current_thread_to_real_time;
 use clap::Parser;
+use crossbeam::channel::bounded;
 use symphonia::core::errors::Error;
 use symphonia::core::{
     audio::SampleBuffer, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream,
@@ -16,8 +16,11 @@ use wigglyair::configuration;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    #[clap(help = "File to play. Must be flac")]
-    audio_file: String,
+    #[clap(help = "First file to play. Must be flac")]
+    file1: String,
+
+    #[clap(help = "Second file to play. Must be flac")]
+    file2: String,
 }
 
 const SAMPLE_RATE: usize = 44100;
@@ -28,17 +31,18 @@ fn main() {
     let _guard = configuration::setup_tracing_async("play".into());
 
     let cli = Cli::parse();
-    let audio_file = cli.audio_file;
+    let file1 = cli.file1;
+    let _file2 = cli.file2;
 
     // create channel for individual samples (interleaved format)
-    let (tx, rx) = mpsc::sync_channel::<f32>(SAMPLE_RATE * CHANNEL_COUNT * 30);
+    let (sample_tx, sample_rx) = bounded::<f32>(SAMPLE_RATE * CHANNEL_COUNT * 30);
 
     // create channel for the sample rate of the first track
-    let (rate_tx, rate_rx) = mpsc::sync_channel::<usize>(1);
+    let (rate_tx, rate_rx) = bounded::<usize>(1);
     let mut rate_tx = Some(rate_tx);
 
     // from: https://github.com/pdeljanov/Symphonia/blob/master/symphonia/examples/basic-interleaved.rs
-    let file = Box::new(File::open(Path::new(&audio_file)).unwrap_or_log());
+    let file = Box::new(File::open(Path::new(&file1)).unwrap_or_log());
     let mss = MediaSourceStream::new(file, Default::default());
     let hint = Hint::new();
 
@@ -98,7 +102,7 @@ fn main() {
                     if let Some(buf) = &mut sample_buf {
                         buf.copy_interleaved_ref(audio_buf);
                         for sample in buf.samples() {
-                            tx.send(*sample).unwrap();
+                            sample_tx.send(*sample).unwrap();
                         }
                     }
                 }
@@ -112,11 +116,7 @@ fn main() {
     });
 
     let sample_rate = rate_rx.recv().unwrap_or_log();
-    tracing::info!(
-        audio_file,
-        sample_rate,
-        "Playing {audio_file} at {sample_rate} Hz"
-    );
+    tracing::info!(file1, sample_rate, "Playing {file1} at {sample_rate} Hz");
 
     let params = OutputDeviceParameters {
         channels_count: CHANNEL_COUNT,
@@ -134,7 +134,7 @@ fn main() {
                 promoted = true;
             }
             for sample in data.iter_mut() {
-                *sample = rx.recv().unwrap_or_log();
+                *sample = sample_rx.recv().unwrap_or_log();
             }
         }
     })
