@@ -30,6 +30,13 @@ fn main() {
     let cli = Cli::parse();
     let audio_file = cli.audio_file;
 
+    // create channel for individual samples (interleaved format)
+    let (tx, rx) = mpsc::sync_channel::<f32>(SAMPLE_RATE * CHANNEL_COUNT * 30);
+
+    // create channel for the sample rate of the first track
+    let (rate_tx, rate_rx) = mpsc::sync_channel::<usize>(1);
+    let mut rate_tx = Some(rate_tx);
+
     // from: https://github.com/pdeljanov/Symphonia/blob/master/symphonia/examples/basic-interleaved.rs
     let file = Box::new(File::open(Path::new(&audio_file)).unwrap_or_log());
     let mss = MediaSourceStream::new(file, Default::default());
@@ -55,12 +62,6 @@ fn main() {
 
     let mut sample_buf = None;
 
-    // create channel for individual samples (interleaved format)
-    let (tx, rx) = mpsc::sync_channel::<f32>(SAMPLE_RATE * CHANNEL_COUNT * 30);
-
-    // create channel for the sample rate of the first track
-    let (rate_tx, rate_rx) = mpsc::sync_channel::<usize>(1);
-
     thread::spawn(move || {
         loop {
             let packet = match format.next_packet() {
@@ -83,7 +84,9 @@ fn main() {
                         let spec = *audio_buf.spec();
                         tracing::info!(?spec, "Decoded audio buffer spec");
 
-                        rate_tx.send(spec.rate as usize).unwrap_or_log();
+                        if let Some(rate_tx) = rate_tx.take() {
+                            rate_tx.send(spec.rate as usize).unwrap_or_log();
+                        }
 
                         let duration = audio_buf.capacity() as u64;
                         tracing::info!(?duration, "Decoded audio buffer duration");
