@@ -3,7 +3,7 @@ use std::{net::SocketAddr, path::Path};
 use config::{Config, ConfigError};
 use serde::Deserialize;
 use tracing::subscriber::set_global_default;
-use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
 use tracing_bunyan_formatter::BunyanFormattingLayer;
 use tracing_subscriber::{prelude::*, EnvFilter};
 
@@ -39,7 +39,9 @@ pub fn setup_tracing_async(name: String) -> WorkerGuard {
     let logdir = Path::new("logs");
 
     let file_appender = tracing_appender::rolling::daily(logdir, logfile);
-    let (non_blocking, guard) = tracing_appender::non_blocking(file_appender);
+    let (non_blocking, guard) = NonBlockingBuilder::default()
+        .lossy(false)
+        .finish(file_appender);
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
     let fmt_layer = BunyanFormattingLayer::new(name, std::io::stdout.and(non_blocking));
     let subscriber = tracing_subscriber::registry()
