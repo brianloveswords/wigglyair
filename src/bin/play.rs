@@ -1,5 +1,6 @@
-use std::io;
+use std::sync::{mpsc, Arc, Mutex};
 use std::{fs::File, path::Path};
+use std::{io, thread};
 
 use audio_thread_priority::promote_current_thread_to_real_time;
 use clap::Parser;
@@ -18,6 +19,9 @@ struct Cli {
     #[clap(help = "File to play. Must be flac")]
     audio_file: String,
 }
+
+const SAMPLE_RATE: usize = 44100;
+const CHANNEL_COUNT: usize = 2;
 
 #[tokio::main]
 async fn main() {
@@ -51,90 +55,85 @@ async fn main() {
     let track_id = track.id;
 
     let mut sample_buf = None;
-    let mut full_audio_buf = Vec::<f32>::new();
-    loop {
-        let packet = match format.next_packet() {
-            Ok(packet) => packet,
-            Err(Error::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-            Err(err) => {
-                tracing::error!(?err, "Error reading packet");
-                panic!("Error reading packet")
-            }
-        };
 
-        // If the packet does not belong to the selected track, skip it.
-        if packet.track_id() != track_id {
-            continue;
-        }
+    // create channel for individual samples (interleaved format)
+    let (tx, rx) = mpsc::sync_channel::<f32>(SAMPLE_RATE / 5);
 
-        match decoder.decode(&packet) {
-            Ok(audio_buf) => {
-                // The decoded audio samples may now be accessed via the audio buffer if per-channel
-                // slices of samples in their native decoded format is desired. Use-cases where
-                // the samples need to be accessed in an interleaved order or converted into
-                // another sample format, or a byte buffer is required, are covered by copying the
-                // audio buffer into a sample buffer or raw sample buffer, respectively. In the
-                // example below, we will copy the audio buffer into a sample buffer in an
-                // interleaved order while also converting to a f32 sample format.
+    // create channel for the sample rate of the first track
+    let (rate_tx, rate_rx) = mpsc::sync_channel::<usize>(1);
 
-                // If this is the *first* decoded packet, create a sample buffer matching the
-                // decoded audio buffer format.
-                if sample_buf.is_none() {
-                    // Get the audio buffer specification.
-                    let spec = *audio_buf.spec();
-                    tracing::info!(?spec, "Decoded audio buffer spec");
-
-                    // Get the capacity of the decoded buffer. Note: This is capacity, not length!
-                    let duration = audio_buf.capacity() as u64;
-                    tracing::info!(?duration, "Decoded audio buffer duration");
-
-                    // Create the f32 sample buffer.
-                    sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
+    thread::spawn(move || {
+        loop {
+            let packet = match format.next_packet() {
+                Ok(packet) => packet,
+                Err(Error::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                Err(err) => {
+                    tracing::error!(?err, "Error reading packet");
+                    panic!("Error reading packet")
                 }
+            };
 
-                // Copy the decoded audio buffer into the sample buffer in an interleaved format.
-                if let Some(buf) = &mut sample_buf {
-                    buf.copy_interleaved_ref(audio_buf);
-                    full_audio_buf.extend_from_slice(buf.samples());
+            // If the packet does not belong to the selected track, skip it.
+            if packet.track_id() != track_id {
+                continue;
+            }
+
+            match decoder.decode(&packet) {
+                Ok(audio_buf) => {
+                    if sample_buf.is_none() {
+                        let spec = *audio_buf.spec();
+                        tracing::info!(?spec, "Decoded audio buffer spec");
+
+                        rate_tx.send(spec.rate as usize).unwrap_or_log();
+
+                        let duration = audio_buf.capacity() as u64;
+                        tracing::info!(?duration, "Decoded audio buffer duration");
+
+                        sample_buf = Some(SampleBuffer::<f32>::new(duration, spec));
+                    }
+
+                    // Copy the decoded audio buffer into the sample buffer in an interleaved format.
+                    if let Some(buf) = &mut sample_buf {
+                        buf.copy_interleaved_ref(audio_buf);
+                        for sample in buf.samples() {
+                            tx.send(*sample).unwrap();
+                        }
+                    }
+                }
+                Err(Error::DecodeError(err)) => tracing::error!(?err, "audio loop: decode error"),
+                Err(err) => {
+                    tracing::error!(?err, "audio loop: error");
+                    break;
                 }
             }
-            Err(Error::DecodeError(err)) => tracing::error!(?err, "audio loop: decode error"),
-            Err(err) => {
-                tracing::error!(?err, "audio loop: error");
-                break;
-            }
         }
-    }
+    });
 
-    let full_audio_buf_len = full_audio_buf.len();
-    tracing::info!(?full_audio_buf_len, "sample buffer length");
-    tracing::info!(audio_file, "Playing {audio_file}");
+    let sample_rate = rate_rx.recv().unwrap_or_log();
+    tracing::info!(
+        audio_file,
+        sample_rate,
+        "Playing {audio_file} at {sample_rate} Hz"
+    );
 
     let params = OutputDeviceParameters {
-        channels_count: 2,
-        sample_rate: 44100,
-        channel_sample_count: 4410,
+        channels_count: CHANNEL_COUNT,
+        sample_rate,
+        channel_sample_count: sample_rate / 10,
     };
 
     let _device = run_output_device(params, {
         let mut promoted = false;
         move |data| {
             if !promoted {
-                let tid = promote_current_thread_to_real_time(0, 44100).unwrap_or_log();
+                let tid =
+                    promote_current_thread_to_real_time(0, SAMPLE_RATE as u32).unwrap_or_log();
                 tracing::info!(?tid, "thread promoted");
                 promoted = true;
             }
-
-            let size = data.len();
-            let remaining = full_audio_buf.len();
-            tracing::info!(remaining, "Remaining samples: {}", remaining);
-
-            let drain_size = std::cmp::min(size, remaining);
-            let mut sample_buf = full_audio_buf.drain(..drain_size).collect::<Vec<_>>();
-
-            // zero pad the rest and copy to output buffer
-            sample_buf.resize(size, 0.0);
-            data.copy_from_slice(&sample_buf);
+            for sample in data.iter_mut() {
+                *sample = rx.recv().unwrap_or_log();
+            }
         }
     })
     .unwrap();
