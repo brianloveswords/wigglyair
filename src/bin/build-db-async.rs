@@ -9,6 +9,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::Sender;
 use tokio::task;
 use tokio_rusqlite::Connection as AsyncConnection;
+use tracing_unwrap::ResultExt;
 use walkdir::DirEntry;
 use walkdir::WalkDir;
 use wigglyair::{
@@ -56,11 +57,11 @@ async fn main() {
                     "../../migrations/20230809235427-create-tracks.sql"
                 ))])
                 .to_latest(conn)
-                .expect("Failed to run migrations");
+                .unwrap_or_log();
                 Ok(())
             })
             .await
-            .expect("Failed to run migrations");
+            .unwrap_or_log();
         db
     };
 
@@ -114,7 +115,7 @@ async fn main() {
 
                         let mut stmt = conn
                             .prepare_cached(query)
-                            .expect("Failed to prepare statement");
+                            .expect_or_log("Failed to prepare statement");
 
                         stmt.execute(params![
                             track.path.to_str().unwrap(),
@@ -127,7 +128,7 @@ async fn main() {
                             track.album_artist,
                             track.track,
                         ])
-                        .expect("Failed to execute statement");
+                        .expect_or_log("Failed to execute statement");
                         Ok(())
                     });
                     task.await

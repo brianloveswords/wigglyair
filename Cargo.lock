@@ -1502,6 +1502,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-unwrap"
+version = "0.10.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77934bd2f10b38daeb37d0e24fb94f7bb83e08b474a0568d6ba71876c797c02e"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1655,6 +1664,7 @@ dependencies = [
  "tracing-appender",
  "tracing-bunyan-formatter",
  "tracing-subscriber",
+ "tracing-unwrap",
  "walkdir",
 ]
 

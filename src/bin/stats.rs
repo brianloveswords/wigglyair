@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use clap::Parser;
 use tokio::task;
+use tracing_unwrap::ResultExt;
 use wigglyair::configuration;
 use wigglyair::database::AsyncDatabase;
 use wigglyair::database::DatabaseKind;
@@ -26,11 +27,7 @@ async fn main() {
     let conn1 = Arc::clone(&conn);
     let t1 = task::spawn(async move {
         loop {
-            conn1
-                .call(get_artist_count)
-                .await
-                .map_err(|e| tracing::error!("Query failed: {}", e))
-                .unwrap();
+            conn1.call(get_artist_count).await.unwrap_or_log();
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
     });
@@ -38,11 +35,7 @@ async fn main() {
     let conn2 = Arc::clone(&conn);
     let t2 = task::spawn(async move {
         loop {
-            conn2
-                .call(get_album_count)
-                .await
-                .map_err(|e| tracing::error!("Query failed: {}", e))
-                .unwrap();
+            conn2.call(get_album_count).await.unwrap_or_log();
             tokio::time::sleep(Duration::from_secs(3)).await;
         }
     });
