@@ -5,10 +5,7 @@ use audio_thread_priority::promote_current_thread_to_real_time;
 use clap::Parser;
 use crossbeam::channel::bounded;
 use symphonia::core::errors::Error;
-use symphonia::core::{
-    audio::SampleBuffer, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream,
-    meta::MetadataOptions, probe::Hint,
-};
+use symphonia::core::{audio::SampleBuffer, io::MediaSourceStream, probe::Hint};
 use tinyaudio::prelude::*;
 use tracing_unwrap::ResultExt;
 use wigglyair::configuration;
@@ -41,24 +38,23 @@ fn main() {
     let (rate_tx, rate_rx) = bounded::<usize>(1);
     let mut rate_tx = Some(rate_tx);
 
-    // from: https://github.com/pdeljanov/Symphonia/blob/master/symphonia/examples/basic-interleaved.rs
-    let file = Box::new(File::open(Path::new(&file1)).unwrap_or_log());
-    let mss = MediaSourceStream::new(file, Default::default());
-    let hint = Hint::new();
-
-    // Use the default options when reading and decoding.
-    let format_opts: FormatOptions = Default::default();
-    let metadata_opts: MetadataOptions = Default::default();
-    let decoder_opts: DecoderOptions = Default::default();
-
-    let probed = symphonia::default::get_probe()
-        .format(&hint, mss, &format_opts, &metadata_opts)
-        .unwrap();
+    let probed = {
+        let file = Box::new(File::open(Path::new(&file1)).unwrap_or_log());
+        symphonia::default::get_probe()
+            .format(
+                &Hint::new(),
+                MediaSourceStream::new(file, Default::default()),
+                &Default::default(),
+                &Default::default(),
+            )
+            .unwrap()
+    };
 
     let mut format = probed.format;
     let track = format.default_track().unwrap();
+
     let mut decoder = symphonia::default::get_codecs()
-        .make(&track.codec_params, &decoder_opts)
+        .make(&track.codec_params, &Default::default())
         .unwrap();
 
     // Store the track identifier, we'll use it to filter packets.
