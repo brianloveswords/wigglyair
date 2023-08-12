@@ -1,6 +1,4 @@
-use audio_thread_priority::{
-    demote_current_thread_from_real_time, promote_current_thread_to_real_time,
-};
+use audio_thread_priority::promote_current_thread_to_real_time;
 use clap::Parser;
 use tinyaudio::prelude::*;
 use tracing_unwrap::ResultExt;
@@ -32,9 +30,14 @@ async fn main() {
     // play a sine wave
     let _device = run_output_device(params, {
         let mut clock = 0f32;
+        let mut promoted = false;
         move |data| {
+            if !promoted {
+                let tid = promote_current_thread_to_real_time(0, 44100).unwrap_or_log();
+                tracing::info!(?tid, "thread promoted");
+                promoted = true;
+            }
             tracing::info!("Writing {} samples", data.len());
-            promote_current_thread_to_real_time(1024, 44100).unwrap_or_log();
             for samples in data.chunks_mut(params.channels_count) {
                 clock = (clock + 1.0) % params.sample_rate as f32;
                 let value =
