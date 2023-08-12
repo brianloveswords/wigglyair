@@ -1,14 +1,19 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use clap::Parser;
 use rusqlite::params;
+use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
-use tokio::sync::mpsc::{self, UnboundedSender};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::Sender;
+use tokio::task;
+use tokio_rusqlite::Connection as AsyncConnection;
 use walkdir::WalkDir;
 use wigglyair::{
-    configuration,
+    self, configuration,
     database::{AsyncDatabase, DatabaseKind},
-    metadata::TrackMetadata,
+    metadata::{self, TrackMetadata},
 };
 
 #[derive(Parser, Debug)]
@@ -60,11 +65,24 @@ async fn main() {
     // we need the reader that's gonna loop on that channel and analyze the files
     // we can use tokio to spawn tasks that will do the work
 
-    let (tx, mut rx) = mpsc::unbounded_channel::<AnalyzerMessage>();
-    let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<WriterMessage>();
+    let (tx, mut rx) = mpsc::channel::<AnalyzerMessage>(64);
+    let conn = Arc::new(db.conn);
+
+    let (writer_tx, mut writer_rx) = mpsc::channel::<WriterMessage>(64);
+    let conn1 = Arc::clone(&conn);
+    let t1 = task::spawn(async move {
+        use AnalyzerMessage::*;
+        tracing::info!("Starting analyzer");
+        while let Some(msg) = rx.recv().await {
+            match msg {
+                AnalyzeFile(path) => analyze_file(path, &conn1, &writer_tx).await,
+            }
+        }
+    });
 
     // walk dir, spit files
-    tokio::spawn(async move {
+    let t2 = task::spawn(async move {
+        tracing::info!("Starting walker");
         let paths = WalkDir::new(cli.root)
             .into_iter()
             .filter_map(|e| e.ok())
@@ -72,47 +90,48 @@ async fn main() {
             .map(|e| e.into_path())
             .take(cli.limit.unwrap_or(usize::MAX));
 
-        paths.for_each(|path| match tx.send(AnalyzerMessage::AnalyzeFile(path)) {
-            Err(err) => {
-                tracing::error!("Failed to send path: {}", err)
+        for path in paths {
+            if let Err(e) = tx.send(AnalyzerMessage::AnalyzeFile(path)).await {
+                tracing::error!("Failed to send path: {}", e)
             }
-            _ => {}
-        });
+        }
     });
 
-    tokio::task::spawn(async move {
+    let conn1 = Arc::clone(&conn);
+    let t3 = task::spawn(async move {
+        tracing::info!("Starting writer");
+        let query = "
+            INSERT INTO tracks (
+                path,
+                last_modified,
+                file_size,
+                track_length,
+                album,
+                artist,
+                title,
+                album_artist,
+                track
+            )
+            VALUES (
+                ?1,
+                ?2,
+                ?3,
+                ?4,
+                ?5,
+                ?6,
+                ?7,
+                ?8,
+                ?9
+            )
+        ";
         while let Some(msg) = writer_rx.recv().await {
             match msg {
                 WriterMessage::AddTrack(track) => {
-                    let task = db.conn.call(move |conn| {
+                    let task = conn1.call(move |conn| {
                         tracing::info!("Adding track: {:?}", track);
+
                         let mut stmt = conn
-                            .prepare(
-                                "
-                            INSERT INTO tracks (
-                                path,
-                                last_modified,
-                                file_size,
-                                track_length,
-                                album,
-                                artist,
-                                title,
-                                album_artist,
-                                track
-                            )
-                            VALUES (
-                                ?1,
-                                ?2,
-                                ?3,
-                                ?4,
-                                ?5,
-                                ?6,
-                                ?7,
-                                ?8,
-                                ?9
-                            )
-                            ",
-                            )
+                            .prepare_cached(query)
                             .expect("Failed to prepare statement");
 
                         stmt.execute(params![
@@ -137,15 +156,38 @@ async fn main() {
         }
     });
 
-    while let Some(msg) = rx.recv().await {
-        match msg {
-            AnalyzerMessage::AnalyzeFile(path) => analyze_file(path, &writer_tx).await,
-        }
-    }
+    t1.await.unwrap();
+    t2.await.unwrap();
+    t3.await.unwrap();
 }
 
-async fn analyze_file(path: PathBuf, tx: &UnboundedSender<WriterMessage>) {
-    let meta = match TrackMetadata::from_path(&path).await {
+async fn analyze_file(path: PathBuf, conn: &AsyncConnection, tx: &Sender<WriterMessage>) {
+    tracing::info!("Analyzing {}", path.display());
+
+    let path = Arc::new(path);
+    let stat = match metadata::stat_file(&path).await {
+        Ok(stat) => stat,
+        Err(err) => {
+            tracing::error!("Failed to stat {}: {}", path.display(), err);
+            return;
+        }
+    };
+
+    let last_modified = metadata::last_modified(&stat).expect("Failed to get last modified");
+
+    let is_up_to_date: bool = {
+        let path = Arc::clone(&path);
+        conn.call(move |conn| check_if_path_is_up_to_date(&path, &last_modified, conn))
+            .await
+            .unwrap()
+    };
+
+    if is_up_to_date {
+        tracing::info!("{} is up to date", path.display());
+        return;
+    }
+
+    let meta = match TrackMetadata::from_path_with_stat(&path, &stat).await {
         Ok(meta) => meta,
         Err(err) => {
             tracing::error!("Failed to get metadata for {}: {}", path.display(), err);
@@ -154,9 +196,32 @@ async fn analyze_file(path: PathBuf, tx: &UnboundedSender<WriterMessage>) {
     };
 
     tracing::info!("Got metadata for {}: {:?}", path.display(), meta);
-    tx.send(WriterMessage::AddTrack(meta)).err().map(|err| {
-        tracing::error!("Failed to send metadata for {}: {}", path.display(), err);
-    });
+    tx.send(WriterMessage::AddTrack(meta))
+        .await
+        .err()
+        .map(|err| {
+            tracing::error!("Failed to send metadata for {}: {}", path.display(), err);
+        });
+}
+
+fn check_if_path_is_up_to_date(
+    path: &PathBuf,
+    last_modified: &String,
+    conn: &Connection,
+) -> Result<bool, rusqlite::Error> {
+    let path = path.to_string_lossy();
+    let mut stmt = conn.prepare_cached(
+        "
+            SELECT count(1) AS n
+            FROM `tracks`
+            WHERE 1=1
+                AND `path` = ?1
+                AND `last_modified` = ?2
+        ",
+    )?;
+    let mut rows = stmt.query(params![path, last_modified])?;
+    let n: i64 = rows.next()?.unwrap().get(0)?;
+    Ok(n > 0)
 }
 
 fn is_flac(e: &walkdir::DirEntry) -> bool {

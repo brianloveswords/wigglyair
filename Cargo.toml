@@ -26,4 +26,4 @@ tracing-subscriber = { version = "0.3", features = ["registry", "env-filter"] }
 walkdir = "2.3.3"
 
 [profile.release]
-# debug = true
+debug = true
