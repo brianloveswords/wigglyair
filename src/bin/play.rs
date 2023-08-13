@@ -4,7 +4,7 @@ use std::{io, thread};
 
 use audio_thread_priority::promote_current_thread_to_real_time;
 use clap::Parser;
-use crossbeam::channel::bounded;
+use crossbeam::channel::{bounded, unbounded};
 use symphonia::core::audio::SignalSpec;
 use symphonia::core::errors::Error;
 use symphonia::core::{audio::SampleBuffer, io::MediaSourceStream, probe::Hint};
@@ -43,6 +43,16 @@ impl SampleBufferSpec {
     }
 }
 
+enum Event {
+    AddTrackSamplePoint { file: String, samples: u64 },
+}
+
+#[derive(Debug)]
+struct TrackSamplePoint {
+    file: String,
+    samples: u64,
+}
+
 fn main() {
     // when this leaves scope the logs will be flushed
     let _guard = configuration::setup_tracing_async("play".into());
@@ -59,10 +69,20 @@ fn main() {
     // channel for the sample rate of the first track
     let (rate_tx, rate_rx) = bounded::<usize>(1);
 
+    let (event_tx, event_rx) = unbounded::<Event>();
+
     let reader = thread::spawn(move || {
+        let mut samples_read = 0u64;
         let mut skip_samples_remaining = skip;
         let mut rate_sent = false;
         for file in files {
+            event_tx
+                .send(Event::AddTrackSamplePoint {
+                    file: file.clone(),
+                    samples: samples_read,
+                })
+                .unwrap_or_log();
+
             let path = Path::new(&file);
             if path.extension().unwrap_or_default() != "flac" {
                 tracing::error!(?path, "Skipping non-flac file");
@@ -112,7 +132,7 @@ fn main() {
                     Ok(audio_buf) => {
                         if sample_buf.is_none() {
                             let spec = *audio_buf.spec();
-                            tracing::info!(?spec, "Decoded audio buffer spec");
+                            tracing::debug!(?spec, "Decoded audio buffer spec");
 
                             // we need the sample rate to set up the audio device but
                             // we only need it once because we're not gonna change it
@@ -123,7 +143,7 @@ fn main() {
                             }
 
                             let duration = audio_buf.capacity() as u64;
-                            tracing::info!(?duration, "Decoded audio buffer duration");
+                            tracing::debug!(duration, "Decoded audio buffer duration");
 
                             sample_buf = Some(SampleBufferSpec::new(duration, spec));
                         }
@@ -142,15 +162,18 @@ fn main() {
                                 );
                                 skip_samples_remaining -= skip_samples;
                                 if skip_samples == buf_len {
+                                    samples_read += skip_samples;
                                     continue;
                                 }
                                 buf_samples = &buf_samples[0..skip_samples as usize];
                             }
-
-                            let mut samples: Vec<f32> = Vec::with_capacity(buf_samples.len());
+                            let buf_samples_len = buf_samples.len();
+                            let mut samples: Vec<f32> = Vec::with_capacity(buf_samples_len);
                             for sample in buf_samples {
                                 samples.push(*sample * volume);
                             }
+
+                            samples_read += buf_samples_len as u64;
 
                             loop {
                                 match samples_tx.try_send(samples.clone()) {
@@ -160,7 +183,7 @@ fn main() {
                                         thread::sleep(Duration::from_secs(8));
                                     }
                                     Ok(_) => {
-                                        tracing::trace!("Sent samples");
+                                        tracing::trace!(samples = buf_samples_len, "Sent samples");
                                         break;
                                     }
                                     Err(err) => {
@@ -196,6 +219,8 @@ fn main() {
         let mut promoted = false;
         let mut buf: Vec<f32> = Vec::new();
         let mut samples_processed = skip;
+        let mut trackpoints: Vec<TrackSamplePoint> = vec![];
+
         move |data| {
             if !promoted {
                 let tid = promote_current_thread_to_real_time(
@@ -205,6 +230,15 @@ fn main() {
                 .unwrap_or_log();
                 tracing::info!(?tid, "Thread promoted");
                 promoted = true;
+            }
+
+            if let Ok(event) = event_rx.try_recv() {
+                match event {
+                    Event::AddTrackSamplePoint { file, samples } => {
+                        tracing::info!(?file, ?samples, "Adding track sample point");
+                        trackpoints.push(TrackSamplePoint { file, samples });
+                    }
+                }
             }
 
             let size = data.len();
@@ -224,7 +258,7 @@ fn main() {
             data.copy_from_slice(&buf[..size]);
             buf.drain(..size);
 
-            tracing::info!(samples_processed, "Played {samples_processed} samples");
+            tracing::trace!(samples_processed, "Played {samples_processed} samples");
         }
     })
     .unwrap_or_log();

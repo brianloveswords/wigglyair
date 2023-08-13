@@ -31,4 +31,4 @@ tracing-unwrap = { version = "0.10.0", features = ["log-location"] }
 walkdir = "2.3.3"
 
 [profile.release]
-debug = true
+# debug = true
