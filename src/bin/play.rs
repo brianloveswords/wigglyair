@@ -44,13 +44,13 @@ impl SampleBufferSpec {
 }
 
 enum Event {
-    AddTrackSamplePoint { file: String, samples: u64 },
+    AddTrackSamplePoint(TrackSamplePoint),
 }
 
 #[derive(Debug)]
-struct TrackSamplePoint {
-    file: String,
-    samples: u64,
+pub struct TrackSamplePoint {
+    pub file: String,
+    pub samples: u64,
 }
 
 fn main() {
@@ -77,10 +77,10 @@ fn main() {
         let mut rate_sent = false;
         for file in files {
             event_tx
-                .send(Event::AddTrackSamplePoint {
+                .send(Event::AddTrackSamplePoint(TrackSamplePoint {
                     file: file.clone(),
                     samples: samples_read,
-                })
+                }))
                 .unwrap_or_log();
 
             let path = Path::new(&file);
@@ -234,9 +234,9 @@ fn main() {
 
             if let Ok(event) = event_rx.try_recv() {
                 match event {
-                    Event::AddTrackSamplePoint { file, samples } => {
-                        tracing::info!(?file, ?samples, "Adding track sample point");
-                        trackpoints.push(TrackSamplePoint { file, samples });
+                    Event::AddTrackSamplePoint(point) => {
+                        tracing::info!(?point, "Adding track sample point");
+                        trackpoints.push(point);
                     }
                 }
             }
