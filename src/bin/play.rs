@@ -27,19 +27,25 @@ fn main() {
     let cli = Cli::parse();
     let files = cli.files;
 
-    // create channel for individual samples (interleaved format)
+    // channel for buffers of samples
     let (samples_tx, samples_rx) = bounded::<Vec<f32>>(256);
 
-    // create channel for the sample rate of the first track
+    // channel for the sample rate of the first track
     let (rate_tx, rate_rx) = bounded::<usize>(1);
 
     let reader = thread::spawn(move || {
         let mut rate_sent = false;
         for file in files {
-            tracing::info!("Reading file: {}", file);
+            let path = Path::new(&file);
+            if path.extension().unwrap_or_default() != "flac" {
+                tracing::error!(?path, "Skipping non-flac file");
+                continue;
+            }
+
+            tracing::info!(audio_file = file, "Reading audio file");
 
             let probed = {
-                let file = Box::new(File::open(Path::new(&file)).unwrap_or_log());
+                let file = Box::new(File::open(path).unwrap_or_log());
                 symphonia::default::get_probe()
                     .format(
                         &Hint::new(),
@@ -57,11 +63,10 @@ fn main() {
                 .make(&track.codec_params, &Default::default())
                 .unwrap_or_log();
 
-            // Store the track identifier, we'll use it to filter packets.
+            // store the track id so we can filter packets later.
             let track_id = track.id;
 
             let mut sample_buf = None;
-
             loop {
                 let packet = match format.next_packet() {
                     Ok(packet) => packet,
@@ -72,7 +77,6 @@ fn main() {
                     }
                 };
 
-                // If the packet does not belong to the selected track, skip it.
                 if packet.track_id() != track_id {
                     continue;
                 }
@@ -83,6 +87,9 @@ fn main() {
                             let spec = *audio_buf.spec();
                             tracing::info!(?spec, "Decoded audio buffer spec");
 
+                            // we need the sample rate to set up the audio device but
+                            // we only need it once because we're not gonna change it
+                            // ever again.
                             if !rate_sent {
                                 rate_tx.send(spec.rate as usize).unwrap_or_log();
                                 rate_sent = true;
@@ -94,14 +101,14 @@ fn main() {
                             sample_buf = Some(SampleBuffer::new(duration, spec));
                         }
 
-                        // Copy the decoded audio buffer into the sample buffer in an interleaved format.
                         if let Some(buf) = &mut sample_buf {
                             buf.copy_interleaved_ref(audio_buf);
 
                             loop {
                                 match samples_tx.try_send(buf.samples().to_owned()) {
+                                    // if the buffer is full, wait for a bit. this lets us
+                                    // batch reads, which seems to be more efficient.
                                     Err(err) if err.is_full() => {
-                                        // sleep for a bit to let the buffer drain
                                         thread::sleep(Duration::from_secs(8));
                                     }
                                     Ok(_) => {
@@ -114,14 +121,13 @@ fn main() {
                                     }
                                 }
                             }
-                            // samples_tx.send(buf.samples().to_owned()).unwrap_or_log();
                         }
                     }
                     Err(Error::DecodeError(err)) => {
-                        tracing::error!(?err, "Audio loop: decode error")
+                        tracing::error!(err, "Audio loop: decode error")
                     }
                     Err(err) => {
-                        tracing::error!(?err, "Audio loop: error");
+                        tracing::error!(%err, "Audio loop: error");
                         break;
                     }
                 }
