@@ -17,7 +17,6 @@ struct Cli {
     files: Vec<String>,
 }
 
-const DEFAULT_SAMPLE_RATE: usize = 44100;
 const CHANNEL_COUNT: usize = 2;
 
 fn main() {
@@ -28,12 +27,12 @@ fn main() {
     let files = cli.files;
 
     // create channel for individual samples (interleaved format)
-    let (sample_tx, sample_rx) = bounded::<f32>(DEFAULT_SAMPLE_RATE * CHANNEL_COUNT * 30);
+    let (sample_buf_tx, sample_buf_rx) = bounded::<Vec<f32>>(8);
 
     // create channel for the sample rate of the first track
     let (rate_tx, rate_rx) = bounded::<usize>(1);
 
-    thread::spawn(move || {
+    let reader = thread::spawn(move || {
         let mut rate_sent = false;
         for file in files {
             tracing::info!("Reading file: {}", file);
@@ -97,16 +96,14 @@ fn main() {
                         // Copy the decoded audio buffer into the sample buffer in an interleaved format.
                         if let Some(buf) = &mut sample_buf {
                             buf.copy_interleaved_ref(audio_buf);
-                            for sample in buf.samples() {
-                                sample_tx.send(*sample).unwrap_or_log();
-                            }
+                            sample_buf_tx.send(buf.samples().to_owned()).unwrap_or_log();
                         }
                     }
                     Err(Error::DecodeError(err)) => {
-                        tracing::error!(?err, "audio loop: decode error")
+                        tracing::error!(?err, "Audio loop: decode error")
                     }
                     Err(err) => {
-                        tracing::error!(?err, "audio loop: error");
+                        tracing::error!(?err, "Audio loop: error");
                         break;
                     }
                 }
@@ -125,19 +122,24 @@ fn main() {
 
     let _device = run_output_device(params, {
         let mut promoted = false;
+        let mut buf: Vec<f32> = Vec::new();
         move |data| {
+            let size = data.len();
             if !promoted {
-                let tid = promote_current_thread_to_real_time(0, DEFAULT_SAMPLE_RATE as u32)
-                    .unwrap_or_log();
+                let tid =
+                    promote_current_thread_to_real_time(0, sample_rate as u32).unwrap_or_log();
                 tracing::info!(?tid, "Thread promoted");
                 promoted = true;
             }
-            for sample in data.iter_mut() {
-                *sample = sample_rx.recv().unwrap_or_log();
+            while buf.len() < size {
+                let mut buf2 = sample_buf_rx.recv().unwrap_or_log();
+                buf.append(&mut buf2);
             }
+            data.copy_from_slice(&buf[..size]);
+            buf.drain(..size);
         }
     })
     .unwrap_or_log();
 
-    loop {}
+    reader.join().unwrap_or_log();
 }
