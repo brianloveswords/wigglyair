@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::{fs::File, path::Path};
 use std::{io, thread};
 
@@ -27,7 +28,7 @@ fn main() {
     let files = cli.files;
 
     // create channel for individual samples (interleaved format)
-    let (sample_buf_tx, sample_buf_rx) = bounded::<Vec<f32>>(8);
+    let (samples_tx, samples_rx) = bounded::<Vec<f32>>(256);
 
     // create channel for the sample rate of the first track
     let (rate_tx, rate_rx) = bounded::<usize>(1);
@@ -96,7 +97,24 @@ fn main() {
                         // Copy the decoded audio buffer into the sample buffer in an interleaved format.
                         if let Some(buf) = &mut sample_buf {
                             buf.copy_interleaved_ref(audio_buf);
-                            sample_buf_tx.send(buf.samples().to_owned()).unwrap_or_log();
+
+                            loop {
+                                match samples_tx.try_send(buf.samples().to_owned()) {
+                                    Err(err) if err.is_full() => {
+                                        // sleep for a bit to let the buffer drain
+                                        thread::sleep(Duration::from_secs(8));
+                                    }
+                                    Ok(_) => {
+                                        tracing::trace!("Sent samples");
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        tracing::error!(?err, "Error sending samples");
+                                        break;
+                                    }
+                                }
+                            }
+                            // samples_tx.send(buf.samples().to_owned()).unwrap_or_log();
                         }
                     }
                     Err(Error::DecodeError(err)) => {
@@ -132,7 +150,7 @@ fn main() {
                 promoted = true;
             }
             while buf.len() < size {
-                let mut buf2 = sample_buf_rx.recv().unwrap_or_log();
+                let mut buf2 = samples_rx.recv().unwrap_or_log();
                 buf.append(&mut buf2);
             }
             data.copy_from_slice(&buf[..size]);
