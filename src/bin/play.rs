@@ -5,6 +5,7 @@ use std::{io, thread};
 use audio_thread_priority::promote_current_thread_to_real_time;
 use clap::Parser;
 use crossbeam::channel::bounded;
+use symphonia::core::audio::SignalSpec;
 use symphonia::core::errors::Error;
 use symphonia::core::{audio::SampleBuffer, io::MediaSourceStream, probe::Hint};
 use tinyaudio::prelude::*;
@@ -16,16 +17,41 @@ use wigglyair::configuration;
 struct Cli {
     #[clap(help = "Files to play. Must be flac")]
     files: Vec<String>,
+
+    #[clap(short, long, default_value = "100", help = "Volume to play at")]
+    volume: u8,
+
+    #[clap(short, long, default_value = "0", help = "Number of samples to skip")]
+    skip: u64,
 }
 
 const CHANNEL_COUNT: usize = 2;
+const DEFAULT_AUDIO_BUFFER_FRAMES: u32 = 0;
+
+struct SampleBufferSpec {
+    buf: SampleBuffer<f32>,
+}
+
+impl SampleBufferSpec {
+    fn new(duration: u64, spec: SignalSpec) -> Self {
+        let buf = SampleBuffer::<f32>::new(duration, spec);
+        Self::new_from_buffer(buf)
+    }
+
+    fn new_from_buffer(buf: SampleBuffer<f32>) -> Self {
+        Self { buf }
+    }
+}
 
 fn main() {
     // when this leaves scope the logs will be flushed
     let _guard = configuration::setup_tracing_async("play".into());
 
     let cli = Cli::parse();
+
+    let volume = cli.volume as f32 * 0.01;
     let files = cli.files;
+    let skip = cli.skip;
 
     // channel for buffers of samples
     let (samples_tx, samples_rx) = bounded::<Vec<f32>>(256);
@@ -34,6 +60,7 @@ fn main() {
     let (rate_tx, rate_rx) = bounded::<usize>(1);
 
     let reader = thread::spawn(move || {
+        let mut skip_samples_remaining = skip;
         let mut rate_sent = false;
         for file in files {
             let path = Path::new(&file);
@@ -66,7 +93,7 @@ fn main() {
             // store the track id so we can filter packets later.
             let track_id = track.id;
 
-            let mut sample_buf = None;
+            let mut sample_buf: Option<SampleBufferSpec> = None;
             loop {
                 let packet = match format.next_packet() {
                     Ok(packet) => packet,
@@ -98,14 +125,35 @@ fn main() {
                             let duration = audio_buf.capacity() as u64;
                             tracing::info!(?duration, "Decoded audio buffer duration");
 
-                            sample_buf = Some(SampleBuffer::new(duration, spec));
+                            sample_buf = Some(SampleBufferSpec::new(duration, spec));
                         }
 
-                        if let Some(buf) = &mut sample_buf {
+                        if let Some(SampleBufferSpec { buf }) = &mut sample_buf {
                             buf.copy_interleaved_ref(audio_buf);
+                            let mut buf_samples = buf.samples();
+                            let buf_len = buf_samples.len() as u64;
+
+                            if skip_samples_remaining > 0 {
+                                let skip_samples = skip_samples_remaining.min(buf_len);
+                                tracing::trace!(
+                                    skip_samples_remaining,
+                                    skip_samples,
+                                    "Skipping samples"
+                                );
+                                skip_samples_remaining -= skip_samples;
+                                if skip_samples == buf_len {
+                                    continue;
+                                }
+                                buf_samples = &buf_samples[0..skip_samples as usize];
+                            }
+
+                            let mut samples: Vec<f32> = Vec::with_capacity(buf_samples.len());
+                            for sample in buf_samples {
+                                samples.push(*sample * volume);
+                            }
 
                             loop {
-                                match samples_tx.try_send(buf.samples().to_owned()) {
+                                match samples_tx.try_send(samples.clone()) {
                                     // if the buffer is full, wait for a bit. this lets us
                                     // batch reads, which seems to be more efficient.
                                     Err(err) if err.is_full() => {
@@ -147,20 +195,36 @@ fn main() {
     let _device = run_output_device(params, {
         let mut promoted = false;
         let mut buf: Vec<f32> = Vec::new();
+        let mut samples_processed = skip;
         move |data| {
-            let size = data.len();
             if !promoted {
-                let tid =
-                    promote_current_thread_to_real_time(0, sample_rate as u32).unwrap_or_log();
+                let tid = promote_current_thread_to_real_time(
+                    DEFAULT_AUDIO_BUFFER_FRAMES,
+                    sample_rate as u32,
+                )
+                .unwrap_or_log();
                 tracing::info!(?tid, "Thread promoted");
                 promoted = true;
             }
+
+            let size = data.len();
+
             while buf.len() < size {
-                let mut buf2 = samples_rx.recv().unwrap_or_log();
+                let mut buf2 = match samples_rx.recv() {
+                    Ok(buf) => buf,
+                    Err(err) => {
+                        tracing::error!(?err, "Error receiving samples");
+                        return;
+                    }
+                };
                 buf.append(&mut buf2);
             }
+
+            samples_processed += buf.len() as u64;
             data.copy_from_slice(&buf[..size]);
             buf.drain(..size);
+
+            tracing::info!(samples_processed, "Played {samples_processed} samples");
         }
     })
     .unwrap_or_log();
