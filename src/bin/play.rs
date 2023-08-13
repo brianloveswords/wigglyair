@@ -7,17 +7,14 @@ use crossbeam::channel::bounded;
 use symphonia::core::errors::Error;
 use symphonia::core::{audio::SampleBuffer, io::MediaSourceStream, probe::Hint};
 use tinyaudio::prelude::*;
-use tracing_unwrap::ResultExt;
+use tracing_unwrap::*;
 use wigglyair::configuration;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    #[clap(help = "First file to play. Must be flac")]
-    file1: String,
-
-    #[clap(help = "Second file to play. Must be flac")]
-    file2: String,
+    #[clap(help = "Files to play. Must be flac")]
+    files: Vec<String>,
 }
 
 const DEFAULT_SAMPLE_RATE: usize = 44100;
@@ -28,8 +25,7 @@ fn main() {
     let _guard = configuration::setup_tracing_async("play".into());
 
     let cli = Cli::parse();
-    let file1 = cli.file1;
-    let file2 = cli.file2;
+    let files = cli.files;
 
     // create channel for individual samples (interleaved format)
     let (sample_tx, sample_rx) = bounded::<f32>(DEFAULT_SAMPLE_RATE * CHANNEL_COUNT * 30);
@@ -37,7 +33,6 @@ fn main() {
     // create channel for the sample rate of the first track
     let (rate_tx, rate_rx) = bounded::<usize>(1);
 
-    let files = vec![file1, file2];
     thread::spawn(move || {
         let mut rate_sent = false;
         for file in files {
@@ -52,15 +47,15 @@ fn main() {
                         &Default::default(),
                         &Default::default(),
                     )
-                    .unwrap()
+                    .unwrap_or_log()
             };
 
             let mut format = probed.format;
-            let track = format.default_track().unwrap();
+            let track = format.default_track().unwrap_or_log();
 
             let mut decoder = symphonia::default::get_codecs()
                 .make(&track.codec_params, &Default::default())
-                .unwrap();
+                .unwrap_or_log();
 
             // Store the track identifier, we'll use it to filter packets.
             let track_id = track.id;
@@ -72,8 +67,8 @@ fn main() {
                     Ok(packet) => packet,
                     Err(Error::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
                     Err(err) => {
-                        tracing::error!(?err, "Error reading packet");
-                        panic!("Error reading packet")
+                        tracing::error!(?err, file, "Error reading packet");
+                        break;
                     }
                 };
 
@@ -103,7 +98,7 @@ fn main() {
                         if let Some(buf) = &mut sample_buf {
                             buf.copy_interleaved_ref(audio_buf);
                             for sample in buf.samples() {
-                                sample_tx.send(*sample).unwrap();
+                                sample_tx.send(*sample).unwrap_or_log();
                             }
                         }
                     }
@@ -142,7 +137,7 @@ fn main() {
             }
         }
     })
-    .unwrap();
+    .unwrap_or_log();
 
     loop {}
 }
