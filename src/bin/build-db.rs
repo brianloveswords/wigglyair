@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use futures::future;
 use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
@@ -78,7 +79,7 @@ async fn main() {
     let analyzer_rx = Arc::new(Mutex::new(analyzer_rx));
     let writer_tx = Arc::new(writer_tx);
 
-    for id in 0..4 {
+    let analyzer_tasks = (0..4).map(|id| {
         let conn = Arc::clone(&conn);
         let analyzer_rx = Arc::clone(&analyzer_rx);
         let writer_tx = Arc::clone(&writer_tx);
@@ -97,11 +98,11 @@ async fn main() {
                     },
                 }
             }
-        });
-    }
+        })
+    });
 
     let conn1 = Arc::clone(&conn);
-    task::spawn(async move {
+    let writer_task = task::spawn(async move {
         tracing::info!(db_path, "Starting writer");
         let query = "
             INSERT INTO tracks (
@@ -153,29 +154,39 @@ async fn main() {
         }
     });
 
-    let root = cli.root;
+    let walker_task = tokio::spawn(async move {
+        let root = cli.root;
 
-    tracing::info!(root, "Starting walker");
+        tracing::info!(root, "Starting walker");
 
-    let path_filter = path_filter_from_opt(cli.filter);
+        let path_filter = path_filter_from_opt(cli.filter);
+        let paths = WalkDir::new(root)
+            .into_iter()
+            .filter_map(|e| e.ok())
+            .filter(|e| is_flac(e))
+            .filter(path_filter)
+            .map(|e| e.into_path())
+            .take(cli.limit.unwrap_or(usize::MAX));
 
-    let paths = WalkDir::new(root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| is_flac(e))
-        .filter(path_filter)
-        .map(|e| e.into_path())
-        .take(cli.limit.unwrap_or(usize::MAX));
+        for path in paths {
+            analyzer_tx
+                .send(AnalyzerMessage::AnalyzeFile(path))
+                .await
+                .expect_or_log("Failed to send path for analysis")
+        }
+    });
 
-    for path in paths {
-        analyzer_tx
-            .send(AnalyzerMessage::AnalyzeFile(path))
-            .await
-            .expect_or_log("Failed to send path for analysis")
+    // join everything to make sure we don't drop the channels before they're done
+    let mut all_tasks = analyzer_tasks.collect::<Vec<_>>();
+    all_tasks.push(walker_task);
+    all_tasks.push(writer_task);
+
+    for result in future::join_all(all_tasks).await {
+        result.expect_or_log("Failed to join task");
     }
 }
 
-fn path_filter_from_opt(filter: Option<String>) -> Box<dyn Fn(&DirEntry) -> bool> {
+fn path_filter_from_opt(filter: Option<String>) -> Box<dyn Fn(&DirEntry) -> bool + Send> {
     match filter {
         Some(filter) => Box::new(move |e: &DirEntry| {
             fuzzy_match_string(&filter, e.path().to_string_lossy().to_string().as_str())

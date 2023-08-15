@@ -1,34 +1,40 @@
 use clap::Parser;
-use tokio::sync::mpsc;
+use walkdir::WalkDir;
 use wigglyair::configuration;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
-    #[clap(help = "Path to db file")]
-    db: String,
+    #[clap(help = "Root to start walking from")]
+    root: String,
 }
 
 #[tokio::main]
 async fn main() {
     let _guard = configuration::setup_tracing_async("testrig".into());
 
-    let (tx, mut rx) = mpsc::channel(100);
+    let cli = Cli::parse();
+    let root = cli.root;
 
-    let t1 = tokio::spawn(async move {
-        loop {
-            let msg = rx.recv().await;
-            tracing::info!("Received message: {:?}", msg);
+    tracing::info!(root, "Starting walker");
+
+    let paths = WalkDir::new(root)
+        .into_iter()
+        .filter_map(|e| e.ok())
+        .filter(|e| is_flac(e))
+        .map(|e| e.into_path());
+
+    let mut count = 0;
+    for _path in paths {
+        count += 1;
+        if count % 1000 == 0 {
+            tracing::info!(count, "Processed {} files", count);
         }
-    });
+    }
 
-    let t2 = tokio::spawn(async move {
-        loop {
-            tx.send("Hello".to_string()).await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-        }
-    });
+    tracing::info!(count, "Done walking: {} flac files found", count);
+}
 
-    t1.await.unwrap();
-    t2.await.unwrap();
+fn is_flac(e: &walkdir::DirEntry) -> bool {
+    e.file_type().is_file() && e.path().extension().unwrap_or_default() == "flac"
 }
