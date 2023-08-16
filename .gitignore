@@ -1,6 +1,6 @@
 /target
 logs
-cache.json
+history.txt
 tmp
 *.backup
 *.db

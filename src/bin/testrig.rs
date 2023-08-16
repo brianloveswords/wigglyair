@@ -1,46 +1,65 @@
-use clap::Parser;
-use std::sync::atomic::{AtomicU32, Ordering};
-use walkdir::WalkDir;
-use wigglyair::configuration;
+use std::thread;
 
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Cli {
-    #[clap(help = "Root to start walking from")]
-    root: String,
-}
+use crossbeam::channel;
+use rustyline::{error::ReadlineError, DefaultEditor};
+use tracing_unwrap::*;
+use wigglyair::configuration;
 
 #[tokio::main]
 async fn main() {
     let _guard = configuration::setup_tracing_async("testrig".into());
 
-    let cli = Cli::parse();
-    let root = cli.root;
+    tracing::info!("doing it");
+    let mut rl = DefaultEditor::new().unwrap_or_log();
 
-    tracing::info!(root, "Starting walker");
+    if rl.load_history("history.txt").is_err() {
+        tracing::debug!("no previous history");
+    }
 
-    let count = AtomicU32::new(0);
-    WalkDir::new(root)
-        .into_iter()
-        .filter_map(|e| e.ok())
-        .filter(|e| is_flac(e))
-        .map(|e| e.into_path())
-        .for_each(|_| {
-            let old_count = count.fetch_add(1, Ordering::SeqCst);
-            let new_count = old_count + 1;
-            if new_count % 1000 == 0 {
-                tracing::info!(count = new_count, "Processed {} files", new_count);
+    // create a channel to send a string
+    let (tx, rx) = channel::unbounded::<String>();
+
+    let h1 = thread::spawn(move || {
+        loop {
+            let readline = rl.readline(">> ");
+            match readline {
+                Ok(line) => {
+                    if let Err(error) = rl.add_history_entry(line.as_str()) {
+                        tracing::debug!(%error, "failed to add history entry");
+                    };
+
+                    if let Err(error) = tx.send(line) {
+                        tracing::debug!(%error, "failed to send message");
+                    };
+                }
+                Err(ReadlineError::Interrupted) => {
+                    println!("CTRL-C");
+                    break;
+                }
+                Err(ReadlineError::Eof) => {
+                    println!("CTRL-D");
+                    break;
+                }
+                Err(err) => {
+                    println!("Error: {:?}", err);
+                    break;
+                }
             }
-        });
+        }
+        if let Err(error) = rl.save_history("history.txt") {
+            tracing::debug!(%error, "failed to save history");
+        };
+    });
 
-    let total_count = count.load(Ordering::SeqCst);
-    tracing::info!(
-        total_count,
-        "Done walking: {} flac files found",
-        total_count
-    );
-}
+    let h2 = thread::spawn(move || {
+        while let Ok(msg) = rx.recv() {
+            if msg == "" {
+                break;
+            }
+            println!("got message: {} (len={})", msg, msg.len());
+        }
+    });
 
-fn is_flac(e: &walkdir::DirEntry) -> bool {
-    e.file_type().is_file() && e.path().extension().unwrap_or_default() == "flac"
+    h1.join().unwrap();
+    h2.join().unwrap();
 }
