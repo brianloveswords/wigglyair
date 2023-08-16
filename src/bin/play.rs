@@ -19,6 +19,7 @@ struct Cli {
 }
 
 const CHANNEL_COUNT: usize = 2;
+const DEFAULT_AUDIO_BUFFER_FRAMES: u32 = 0;
 
 fn main() {
     // when this leaves scope the logs will be flushed
@@ -150,8 +151,11 @@ fn main() {
         move |data| {
             let size = data.len();
             if !promoted {
-                let tid =
-                    promote_current_thread_to_real_time(0, sample_rate as u32).unwrap_or_log();
+                let tid = promote_current_thread_to_real_time(
+                    DEFAULT_AUDIO_BUFFER_FRAMES,
+                    sample_rate as u32,
+                )
+                .unwrap_or_log();
                 tracing::info!(?tid, "Thread promoted");
                 promoted = true;
             }
