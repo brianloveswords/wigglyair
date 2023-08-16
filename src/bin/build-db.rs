@@ -70,15 +70,14 @@ async fn main() {
             .unwrap_or_log();
         db
     };
+    let conn = Arc::new(db.conn);
 
     let (analyzer_tx, analyzer_rx) = mpsc::channel::<AnalyzerMessage>(512);
     let (writer_tx, mut writer_rx) = mpsc::channel::<WriterMessage>(512);
 
-    let conn = Arc::new(db.conn);
-
     let analyzer_rx = Arc::new(Mutex::new(analyzer_rx));
-    let writer_tx = Arc::new(writer_tx);
 
+    let writer_tx = Arc::new(writer_tx);
     let analyzer_tasks = (0..4).map(|id| {
         let conn = Arc::clone(&conn);
         let analyzer_rx = Arc::clone(&analyzer_rx);
@@ -98,6 +97,7 @@ async fn main() {
                     },
                 }
             }
+            tracing::info!(id, "Finished analyzer");
         })
     });
 
@@ -125,7 +125,7 @@ async fn main() {
                 WriterMessage::AddTrack(track) => {
                     conn1
                         .call(move |conn| {
-                            tracing::info!(?track, "Adding track");
+                            tracing::debug!(?track, "Adding track");
 
                             let mut stmt = conn
                                 .prepare_cached(query)
@@ -152,15 +152,16 @@ async fn main() {
                 }
             }
         }
+        tracing::info!(db_path, "Finished writer");
     });
 
     let walker_task = tokio::spawn(async move {
         let root = cli.root;
 
-        tracing::info!(root, "Starting walker");
+        tracing::info!(%root, "Starting walker");
 
         let path_filter = path_filter_from_opt(cli.filter);
-        let paths = WalkDir::new(root)
+        let paths = WalkDir::new(&root)
             .into_iter()
             .filter_map(|e| e.ok())
             .filter(|e| is_flac(e))
@@ -174,6 +175,9 @@ async fn main() {
                 .await
                 .expect_or_log("Failed to send path for analysis")
         }
+
+        tracing::info!(%root, "Finished walking");
+        drop(analyzer_tx);
     });
 
     // join everything to make sure we don't drop the channels before they're done
@@ -216,7 +220,7 @@ fn fuzzy_match_string(needle: &str, haystack: &str) -> bool {
 }
 
 async fn analyze_file(id: u32, path: PathBuf, conn: &AsyncConnection, tx: &Sender<WriterMessage>) {
-    tracing::info!(id, path = %path.display(), "Analyzing file");
+    tracing::debug!(id, path = %path.display(), "Analyzing file");
 
     let path = Arc::new(path);
     let stat = match metadata::stat_file(&path).await {
@@ -237,7 +241,7 @@ async fn analyze_file(id: u32, path: PathBuf, conn: &AsyncConnection, tx: &Sende
     };
 
     if is_up_to_date {
-        tracing::info!(id, path = %path.display(), "Up to date");
+        tracing::debug!(id, path = %path.display(), "Up to date");
         return;
     }
 
@@ -254,7 +258,7 @@ async fn analyze_file(id: u32, path: PathBuf, conn: &AsyncConnection, tx: &Sende
         }
     };
 
-    tracing::info!(id, ?meta, path = %path.display(), "Got metadata");
+    tracing::debug!(id, ?meta, path = %path.display(), "Got metadata");
     tx.send(WriterMessage::AddTrack(meta))
         .await
         .err()
@@ -271,12 +275,12 @@ fn check_path_is_up_to_date(
     let path = path.to_string_lossy();
     let mut stmt = conn.prepare_cached(
         "
-            SELECT count(1) AS n
-            FROM `tracks`
-            WHERE 1=1
-                AND `path` = ?1
-                AND `last_modified` = ?2
-        ",
+        SELECT count(1) AS n
+        FROM `tracks`
+        WHERE 1=1
+            AND `path` = ?1
+            AND `last_modified` = ?2
+            ",
     )?;
     let mut rows = stmt.query(params![path, last_modified])?;
     let n: i64 = rows.next()?.unwrap_or_log().get(0)?;

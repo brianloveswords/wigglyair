@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::sync::atomic::{AtomicU32, Ordering};
 use walkdir::WalkDir;
 use wigglyair::configuration;
 
@@ -18,21 +19,26 @@ async fn main() {
 
     tracing::info!(root, "Starting walker");
 
-    let paths = WalkDir::new(root)
+    let count = AtomicU32::new(0);
+    WalkDir::new(root)
         .into_iter()
         .filter_map(|e| e.ok())
         .filter(|e| is_flac(e))
-        .map(|e| e.into_path());
+        .map(|e| e.into_path())
+        .for_each(|_| {
+            let old_count = count.fetch_add(1, Ordering::SeqCst);
+            let new_count = old_count + 1;
+            if new_count % 1000 == 0 {
+                tracing::info!(count = new_count, "Processed {} files", new_count);
+            }
+        });
 
-    let mut count = 0;
-    for _path in paths {
-        count += 1;
-        if count % 1000 == 0 {
-            tracing::info!(count, "Processed {} files", count);
-        }
-    }
-
-    tracing::info!(count, "Done walking: {} flac files found", count);
+    let total_count = count.load(Ordering::SeqCst);
+    tracing::info!(
+        total_count,
+        "Done walking: {} flac files found",
+        total_count
+    );
 }
 
 fn is_flac(e: &walkdir::DirEntry) -> bool {

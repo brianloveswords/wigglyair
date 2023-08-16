@@ -81,13 +81,11 @@ pub enum TrackMetadataError {
 pub type FileMetadataMap = BTreeMap<String, TrackMetadata>;
 
 impl TrackMetadata {
-    #[tracing::instrument]
     pub async fn from_path(path: &PathBuf) -> Result<Self, TrackMetadataError> {
         let stat = stat_file(path).await?;
         Self::from_path_with_stat(path, &stat).await
     }
 
-    #[tracing::instrument]
     pub async fn from_path_with_stat(
         path: &PathBuf,
         stat: &std::fs::Metadata,
