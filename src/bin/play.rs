@@ -4,8 +4,7 @@ use std::{io, thread};
 
 use audio_thread_priority::promote_current_thread_to_real_time;
 use clap::Parser;
-use crossbeam::channel::{bounded, unbounded};
-use symphonia::core::audio::SignalSpec;
+use crossbeam::channel::bounded;
 use symphonia::core::errors::Error;
 use symphonia::core::{audio::SampleBuffer, io::MediaSourceStream, probe::Hint};
 use tinyaudio::prelude::*;
@@ -17,51 +16,16 @@ use wigglyair::configuration;
 struct Cli {
     #[clap(help = "Files to play. Must be flac")]
     files: Vec<String>,
-
-    #[clap(short, long, default_value = "100", help = "Volume to play at")]
-    volume: u8,
-
-    #[clap(short, long, default_value = "0", help = "Number of samples to skip")]
-    skip: u64,
 }
 
 const CHANNEL_COUNT: usize = 2;
-const DEFAULT_AUDIO_BUFFER_FRAMES: u32 = 0;
-
-struct SampleBufferSpec {
-    buf: SampleBuffer<f32>,
-}
-
-impl SampleBufferSpec {
-    fn new(duration: u64, spec: SignalSpec) -> Self {
-        let buf = SampleBuffer::<f32>::new(duration, spec);
-        Self::new_from_buffer(buf)
-    }
-
-    fn new_from_buffer(buf: SampleBuffer<f32>) -> Self {
-        Self { buf }
-    }
-}
-
-enum Event {
-    AddTrackSamplePoint(TrackSamplePoint),
-}
-
-#[derive(Debug)]
-pub struct TrackSamplePoint {
-    pub file: String,
-    pub samples: u64,
-}
 
 fn main() {
     // when this leaves scope the logs will be flushed
     let _guard = configuration::setup_tracing_async("play".into());
 
     let cli = Cli::parse();
-
-    let volume = cli.volume as f32 * 0.01;
     let files = cli.files;
-    let skip = cli.skip;
 
     // channel for buffers of samples
     let (samples_tx, samples_rx) = bounded::<Vec<f32>>(256);
@@ -69,20 +33,9 @@ fn main() {
     // channel for the sample rate of the first track
     let (rate_tx, rate_rx) = bounded::<usize>(1);
 
-    let (event_tx, event_rx) = unbounded::<Event>();
-
     let reader = thread::spawn(move || {
-        let mut samples_read = 0u64;
-        let mut skip_samples_remaining = skip;
         let mut rate_sent = false;
         for file in files {
-            event_tx
-                .send(Event::AddTrackSamplePoint(TrackSamplePoint {
-                    file: file.clone(),
-                    samples: samples_read,
-                }))
-                .unwrap_or_log();
-
             let path = Path::new(&file);
             if path.extension().unwrap_or_default() != "flac" {
                 tracing::error!(?path, "Skipping non-flac file");
@@ -113,7 +66,7 @@ fn main() {
             // store the track id so we can filter packets later.
             let track_id = track.id;
 
-            let mut sample_buf: Option<SampleBufferSpec> = None;
+            let mut sample_buf = None;
             loop {
                 let packet = match format.next_packet() {
                     Ok(packet) => packet,
@@ -132,7 +85,7 @@ fn main() {
                     Ok(audio_buf) => {
                         if sample_buf.is_none() {
                             let spec = *audio_buf.spec();
-                            tracing::debug!(?spec, "Decoded audio buffer spec");
+                            tracing::info!(?spec, "Decoded audio buffer spec");
 
                             // we need the sample rate to set up the audio device but
                             // we only need it once because we're not gonna change it
@@ -143,47 +96,23 @@ fn main() {
                             }
 
                             let duration = audio_buf.capacity() as u64;
-                            tracing::debug!(duration, "Decoded audio buffer duration");
+                            tracing::info!(?duration, "Decoded audio buffer duration");
 
-                            sample_buf = Some(SampleBufferSpec::new(duration, spec));
+                            sample_buf = Some(SampleBuffer::new(duration, spec));
                         }
 
-                        if let Some(SampleBufferSpec { buf }) = &mut sample_buf {
+                        if let Some(buf) = &mut sample_buf {
                             buf.copy_interleaved_ref(audio_buf);
-                            let mut buf_samples = buf.samples();
-                            let buf_len = buf_samples.len() as u64;
-
-                            if skip_samples_remaining > 0 {
-                                let skip_samples = skip_samples_remaining.min(buf_len);
-                                tracing::trace!(
-                                    skip_samples_remaining,
-                                    skip_samples,
-                                    "Skipping samples"
-                                );
-                                skip_samples_remaining -= skip_samples;
-                                if skip_samples == buf_len {
-                                    samples_read += skip_samples;
-                                    continue;
-                                }
-                                buf_samples = &buf_samples[0..skip_samples as usize];
-                            }
-                            let buf_samples_len = buf_samples.len();
-                            let mut samples: Vec<f32> = Vec::with_capacity(buf_samples_len);
-                            for sample in buf_samples {
-                                samples.push(*sample * volume);
-                            }
-
-                            samples_read += buf_samples_len as u64;
 
                             loop {
-                                match samples_tx.try_send(samples.clone()) {
+                                match samples_tx.try_send(buf.samples().to_owned()) {
                                     // if the buffer is full, wait for a bit. this lets us
                                     // batch reads, which seems to be more efficient.
                                     Err(err) if err.is_full() => {
                                         thread::sleep(Duration::from_secs(8));
                                     }
                                     Ok(_) => {
-                                        tracing::trace!(samples = buf_samples_len, "Sent samples");
+                                        tracing::trace!("Sent samples");
                                         break;
                                     }
                                     Err(err) => {
@@ -218,47 +147,20 @@ fn main() {
     let _device = run_output_device(params, {
         let mut promoted = false;
         let mut buf: Vec<f32> = Vec::new();
-        let mut samples_processed = skip;
-        let mut trackpoints: Vec<TrackSamplePoint> = vec![];
-
         move |data| {
+            let size = data.len();
             if !promoted {
-                let tid = promote_current_thread_to_real_time(
-                    DEFAULT_AUDIO_BUFFER_FRAMES,
-                    sample_rate as u32,
-                )
-                .unwrap_or_log();
+                let tid =
+                    promote_current_thread_to_real_time(0, sample_rate as u32).unwrap_or_log();
                 tracing::info!(?tid, "Thread promoted");
                 promoted = true;
             }
-
-            if let Ok(event) = event_rx.try_recv() {
-                match event {
-                    Event::AddTrackSamplePoint(point) => {
-                        tracing::info!(?point, "Adding track sample point");
-                        trackpoints.push(point);
-                    }
-                }
-            }
-
-            let size = data.len();
-
             while buf.len() < size {
-                let mut buf2 = match samples_rx.recv() {
-                    Ok(buf) => buf,
-                    Err(err) => {
-                        tracing::error!(?err, "Error receiving samples");
-                        return;
-                    }
-                };
+                let mut buf2 = samples_rx.recv().unwrap_or_log();
                 buf.append(&mut buf2);
             }
-
-            samples_processed += buf.len() as u64;
             data.copy_from_slice(&buf[..size]);
             buf.drain(..size);
-
-            tracing::trace!(samples_processed, "Played {samples_processed} samples");
         }
     })
     .unwrap_or_log();
