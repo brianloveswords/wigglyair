@@ -56,7 +56,7 @@ fn main() {
         for file in files {
             let path = Path::new(&file);
             if path.extension().unwrap_or_default() != "flac" {
-                tracing::error!(?path, "Skipping non-flac file");
+                tracing::warn!(?path, "Skipping non-flac file");
                 continue;
             }
 
