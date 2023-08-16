@@ -2,13 +2,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
+use crossbeam::channel;
 use futures::future;
 use rusqlite::params;
 use rusqlite::Connection;
 use rusqlite_migration::{Migrations, M};
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::Sender;
-use tokio::sync::Mutex;
 use tokio::task;
 use tokio_rusqlite::Connection as AsyncConnection;
 use tracing_unwrap::*;
@@ -72,29 +70,26 @@ async fn main() {
     };
     let conn = Arc::new(db.conn);
 
-    let (analyzer_tx, analyzer_rx) = mpsc::channel::<AnalyzerMessage>(512);
-    let (writer_tx, mut writer_rx) = mpsc::channel::<WriterMessage>(512);
+    let (analyzer_tx, analyzer_rx) = channel::unbounded::<AnalyzerMessage>();
+    let (writer_tx, writer_rx) = channel::unbounded::<WriterMessage>();
 
-    let analyzer_rx = Arc::new(Mutex::new(analyzer_rx));
-
-    let writer_tx = Arc::new(writer_tx);
     let analyzer_tasks = (0..4).map(|id| {
         let conn = Arc::clone(&conn);
-        let analyzer_rx = Arc::clone(&analyzer_rx);
-        let writer_tx = Arc::clone(&writer_tx);
+        let analyzer_rx = analyzer_rx.clone();
+        let writer_tx = writer_tx.clone();
         task::spawn(async move {
             use AnalyzerMessage::*;
             tracing::info!(id, "Starting analyzer");
 
             loop {
-                let msg_opt = analyzer_rx.lock().await.recv().await;
+                let msg_opt = analyzer_rx.recv();
                 match msg_opt {
-                    None => break,
-                    Some(msg) => match msg {
+                    Ok(msg) => match msg {
                         AnalyzeFile(path) => {
                             analyze_file(id, path, &conn, &writer_tx).await;
                         }
                     },
+                    Err(_) => break,
                 }
             }
             tracing::info!(id, "Finished analyzer");
@@ -102,7 +97,7 @@ async fn main() {
     });
 
     let conn1 = Arc::clone(&conn);
-    let writer_task = task::spawn(async move {
+    task::spawn(async move {
         tracing::info!(db_path, "Starting writer");
         let query = "
             INSERT INTO tracks (
@@ -120,7 +115,7 @@ async fn main() {
             )
             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ";
-        while let Some(msg) = writer_rx.recv().await {
+        while let Ok(msg) = writer_rx.recv() {
             match msg {
                 WriterMessage::AddTrack(track) => {
                     conn1
@@ -132,7 +127,7 @@ async fn main() {
                                 .expect_or_log("Failed to prepare statement");
 
                             stmt.execute(params![
-                                track.path.to_str().unwrap(),
+                                track.path.to_str().unwrap_or_log(),
                                 track.last_modified,
                                 track.file_size,
                                 track.track_length,
@@ -172,18 +167,17 @@ async fn main() {
         for path in paths {
             analyzer_tx
                 .send(AnalyzerMessage::AnalyzeFile(path))
-                .await
                 .expect_or_log("Failed to send path for analysis")
         }
 
         tracing::info!(%root, "Finished walking");
-        drop(analyzer_tx);
     });
 
     // join everything to make sure we don't drop the channels before they're done
+    // don't join the writer, though—we want that to drop once we're done analyzing
+    // otherwise we'll hang on to the writer too long.
     let mut all_tasks = analyzer_tasks.collect::<Vec<_>>();
     all_tasks.push(walker_task);
-    all_tasks.push(writer_task);
 
     for result in future::join_all(all_tasks).await {
         result.expect_or_log("Failed to join task");
@@ -219,7 +213,12 @@ fn fuzzy_match_string(needle: &str, haystack: &str) -> bool {
     true
 }
 
-async fn analyze_file(id: u32, path: PathBuf, conn: &AsyncConnection, tx: &Sender<WriterMessage>) {
+async fn analyze_file(
+    id: u32,
+    path: PathBuf,
+    conn: &AsyncConnection,
+    tx: &channel::Sender<WriterMessage>,
+) {
     tracing::debug!(id, path = %path.display(), "Analyzing file");
 
     let path = Arc::new(path);
@@ -259,12 +258,9 @@ async fn analyze_file(id: u32, path: PathBuf, conn: &AsyncConnection, tx: &Sende
     };
 
     tracing::debug!(id, ?meta, path = %path.display(), "Got metadata");
-    tx.send(WriterMessage::AddTrack(meta))
-        .await
-        .err()
-        .map(|err| {
-            tracing::error!(id, %err, path = %path.display(), "Failed to send metadata");
-        });
+    tx.send(WriterMessage::AddTrack(meta)).err().map(|err| {
+        tracing::error!(id, %err, path = %path.display(), "Failed to send metadata");
+    });
 }
 
 fn check_path_is_up_to_date(
