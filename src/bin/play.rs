@@ -16,10 +16,26 @@ use wigglyair::configuration;
 struct Cli {
     #[clap(help = "Files to play. Must be flac")]
     files: Vec<String>,
+
+    // volumne
+    #[clap(short, long, default_value = "1.0")]
+    volume: f32,
 }
 
 const CHANNEL_COUNT: usize = 2;
 const DEFAULT_AUDIO_BUFFER_FRAMES: u32 = 0;
+
+struct Volume(f32);
+
+impl Volume {
+    fn new(volume: f32) -> Self {
+        assert!(
+            volume >= 0.0 && volume <= 1.0,
+            "Volume must be between 0.0 and 1.0"
+        );
+        Self(volume)
+    }
+}
 
 fn main() {
     // when this leaves scope the logs will be flushed
@@ -27,6 +43,7 @@ fn main() {
 
     let cli = Cli::parse();
     let files = cli.files;
+    let volume = Volume::new(cli.volume);
 
     // channel for buffers of samples
     let (samples_tx, samples_rx) = bounded::<Vec<f32>>(256);
@@ -160,7 +177,12 @@ fn main() {
                 promoted = true;
             }
             while buf.len() < size {
-                let mut buf2 = samples_rx.recv().unwrap_or_log();
+                let mut buf2: Vec<f32> = samples_rx
+                    .recv()
+                    .unwrap_or_log()
+                    .iter()
+                    .map(|s| s * volume.0)
+                    .collect();
                 buf.append(&mut buf2);
             }
             data.copy_from_slice(&buf[..size]);
