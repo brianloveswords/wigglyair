@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -55,6 +56,30 @@ impl From<AudioParams> for OutputDeviceParameters {
     }
 }
 
+struct PlayState(AtomicBool);
+
+impl PlayState {
+    fn new() -> Self {
+        Self(AtomicBool::new(true))
+    }
+
+    fn toggle(&self) -> bool {
+        self.0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(!v))
+            .unwrap_or_log()
+    }
+
+    fn is_paused(&self) -> bool {
+        !self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for PlayState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 fn main() {
     // when this leaves scope the logs will be flushed
     let _guard = configuration::setup_tracing_async("play".into());
@@ -65,21 +90,23 @@ fn main() {
         let v = Volume::try_from(cli.volume).expect_or_log("Could not parse volume");
         Arc::new(v)
     };
+    let play_state = Arc::new(PlayState::default());
 
-    // channel for buffers of samples
     let (samples_tx, samples_rx) = bounded::<Vec<f32>>(256);
-
-    // channel for the output parameters
     let (params_tx, params_rx) = bounded::<AudioParams>(1);
 
-    let _ = start_volume_reader(volume.clone());
+    let _ = start_volume_reader(volume.clone(), play_state.clone());
     let file_reader = start_file_reader(files, params_tx.clone(), samples_tx.clone());
 
     let params = params_rx.recv().unwrap_or_log();
     tracing::info!(?params, "Setting up audio device");
     let _device = run_output_device(params.into(), {
+        // keep track of whether this thread was already promoted to real time
         let mut promoted = false;
+
+        // buffer to store samples that are ready to be played
         let mut buf: Vec<f32> = Vec::new();
+
         let volume = volume.clone();
         move |data| {
             if !promoted {
@@ -92,17 +119,26 @@ fn main() {
                 promoted = true;
             }
 
-            let volume = volume.get();
             let size = data.len();
 
+            // if we're paused, fill the buffer with zeros and get outta here
+            // TODO: would it be better to create the 0 vec just once somewhere?
+            if play_state.is_paused() {
+                let zeros = vec![0.0f32; size];
+                data.copy_from_slice(&zeros[..]);
+                return;
+            }
+
+            let volume = volume.get();
+
             while buf.len() < size {
-                let mut buf2: Vec<f32> = samples_rx
+                let mut tmp = samples_rx
                     .recv()
                     .unwrap_or_log()
                     .iter()
                     .map(|s| s * (volume as f32 / 100.0))
                     .collect();
-                buf.append(&mut buf2);
+                buf.append(&mut tmp);
             }
             tracing::trace!(volume, size, "Rendering samples");
             data.copy_from_slice(&buf[..size]);
@@ -114,7 +150,7 @@ fn main() {
     file_reader.join().unwrap_or_log();
 }
 
-fn start_volume_reader(volume: Arc<Volume>) -> JoinHandle<()> {
+fn start_volume_reader(volume: Arc<Volume>, play_state: Arc<PlayState>) -> JoinHandle<()> {
     thread::spawn(move || loop {
         eprint!("> ");
 
@@ -123,14 +159,32 @@ fn start_volume_reader(volume: Arc<Volume>) -> JoinHandle<()> {
             tracing::error!("Error reading line: {}", error);
             break;
         }
-        let msg = msg.trim();
+        let command_line = msg.trim().split_whitespace().collect::<Vec<_>>();
+        let command = match command_line.get(0) {
+            Some(command) => *command,
+            None => continue,
+        };
+
+        let tail = command_line[1..].to_vec();
+        match command {
+            "" => continue,
+            "v" => {
+                let value = tail.get(0).unwrap_or(&"");
+                match volume.set_from_string(value) {
+                    Ok(()) => tracing::info!(volume = value, "Setting volume"),
+                    Err(error) => tracing::error!(?error, "Error setting volume"),
+                }
+            }
+            "p" => {
+                let playing = !play_state.toggle();
+                tracing::info!(playing, "{}", if playing { "Playing" } else { "Pausing" });
+            }
+            _ => {}
+        };
+
         if msg == "" {
             eprintln!();
             continue;
-        }
-        match volume.set_from_string(&msg) {
-            Ok(()) => tracing::info!(volume = msg, "Setting volume"),
-            Err(error) => tracing::error!(?error, "Error setting volume"),
         }
     })
 }
