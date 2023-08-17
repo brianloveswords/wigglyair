@@ -32,8 +32,8 @@ async fn main() {
         if msg == "" {
             break;
         }
-        match vol1.set_from_string(msg) {
-            Ok(()) => tracing::debug!(volume = vol1.get(), "set volume"),
+        match vol1.set_from_string(&msg) {
+            Ok(()) => tracing::debug!(volume = msg, "set volume"),
             Err(error) => tracing::error!("error setting volume: {:?}", error),
         }
     });

@@ -49,11 +49,11 @@ impl Volume {
         }
     }
 
-    pub fn set_from_string(&self, value: String) -> Result<(), VolumeError> {
+    pub fn set_from_string(&self, value: &str) -> Result<(), VolumeError> {
         let value: u8 = value
             .trim()
             .parse()
-            .map_err(|_| VolumeError::InvalidString(value))?;
+            .map_err(|_| VolumeError::InvalidString(value.to_owned()))?;
         self.set(value)
     }
 }

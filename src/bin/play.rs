@@ -51,15 +51,16 @@ fn main() {
 
         let mut msg = String::new();
         if let Err(error) = std::io::stdin().read_line(&mut msg) {
-            tracing::error!("error reading line: {}", error);
+            tracing::error!("Error reading line: {}", error);
             break;
         }
         if msg == "" {
-            break;
+            println!();
+            continue;
         }
-        match vol1.set_from_string(msg) {
-            Ok(()) => tracing::debug!(volume = vol1.get(), "set volume"),
-            Err(error) => tracing::error!("error setting volume: {:?}", error),
+        match vol1.set_from_string(&msg) {
+            Ok(()) => tracing::info!(volume = msg, "Setting volume"),
+            Err(error) => tracing::error!(?error, "Error setting volume"),
         }
     });
 
@@ -133,7 +134,6 @@ fn main() {
 
                         if let Some(buf) = &mut sample_buf {
                             buf.copy_interleaved_ref(audio_buf);
-
                             loop {
                                 match samples_tx.try_send(buf.samples().to_owned()) {
                                     // if the buffer is full, wait for a bit. this lets us
