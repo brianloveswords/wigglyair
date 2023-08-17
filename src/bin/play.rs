@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -26,7 +25,23 @@ struct Cli {
     volume: u8,
 }
 
-const CHANNEL_COUNT: usize = 2;
+#[derive(Debug)]
+struct AudioDeviceParams {
+    channel_count: usize,
+    sample_rate: usize,
+    channel_sample_count: usize,
+}
+
+impl From<AudioDeviceParams> for OutputDeviceParameters {
+    fn from(other: AudioDeviceParams) -> Self {
+        Self {
+            channels_count: other.channel_count,
+            sample_rate: other.sample_rate,
+            channel_sample_count: other.channel_sample_count,
+        }
+    }
+}
+
 const DEFAULT_AUDIO_BUFFER_FRAMES: u32 = 0;
 
 fn main() {
@@ -43,25 +58,19 @@ fn main() {
     // channel for buffers of samples
     let (samples_tx, samples_rx) = bounded::<Vec<f32>>(256);
 
-    // channel for the sample rate of the first track
-    let (rate_tx, rate_rx) = bounded::<usize>(1);
+    // channel for the output parameters
+    let (params_tx, params_rx) = bounded::<AudioDeviceParams>(1);
 
     let _ = start_volume_reader(volume.clone());
-    let file_reader = start_file_reader(files, rate_tx.clone(), samples_tx.clone());
+    let file_reader = start_file_reader(files, params_tx.clone(), samples_tx.clone());
 
-    let sample_rate = rate_rx.recv().unwrap_or_log();
-    tracing::info!(sample_rate, "Playing at {sample_rate} Hz");
-
-    let params = OutputDeviceParameters {
-        channels_count: CHANNEL_COUNT,
-        sample_rate,
-        channel_sample_count: sample_rate / 10,
-    };
-
-    let _device = run_output_device(params, {
+    let params = params_rx.recv().unwrap_or_log();
+    let sample_rate = params.sample_rate;
+    tracing::info!(?params, "Setting up audio device");
+    let _device = run_output_device(params.into(), {
         let mut promoted = false;
         let mut buf: Vec<f32> = Vec::new();
-        let vol1 = volume.clone();
+        let volume = volume.clone();
         move |data| {
             if !promoted {
                 let tid = promote_current_thread_to_real_time(
@@ -73,9 +82,8 @@ fn main() {
                 promoted = true;
             }
 
-            let volume = vol1.get();
+            let volume = volume.get();
             let size = data.len();
-            tracing::trace!(volume, size, "Writing samples");
 
             while buf.len() < size {
                 let mut buf2: Vec<f32> = samples_rx
@@ -86,6 +94,7 @@ fn main() {
                     .collect();
                 buf.append(&mut buf2);
             }
+            tracing::trace!(volume, size, "Rendering samples");
             data.copy_from_slice(&buf[..size]);
             buf.drain(..size);
         }
@@ -97,7 +106,7 @@ fn main() {
 
 fn start_volume_reader(volume: Arc<Volume>) -> JoinHandle<()> {
     thread::spawn(move || loop {
-        write!(std::io::stderr(), "> ").unwrap();
+        eprint!("> ");
 
         let mut msg = String::new();
         if let Err(error) = std::io::stdin().read_line(&mut msg) {
@@ -105,7 +114,7 @@ fn start_volume_reader(volume: Arc<Volume>) -> JoinHandle<()> {
             break;
         }
         if msg == "" {
-            println!();
+            eprintln!();
             continue;
         }
         match volume.set_from_string(&msg) {
@@ -117,11 +126,11 @@ fn start_volume_reader(volume: Arc<Volume>) -> JoinHandle<()> {
 
 fn start_file_reader(
     files: Vec<String>,
-    rate_tx: Sender<usize>,
+    params_tx: Sender<AudioDeviceParams>,
     samples_tx: Sender<Vec<f32>>,
 ) -> JoinHandle<()> {
     thread::spawn(move || {
-        let mut rate_sent = false;
+        let mut params_sent = false;
         for file in files {
             let path = Path::new(&file);
             if path.extension().unwrap_or_default() != "flac" {
@@ -172,18 +181,20 @@ fn start_file_reader(
                     Ok(audio_buf) => {
                         if sample_buf.is_none() {
                             let spec = *audio_buf.spec();
-                            tracing::info!(?spec, "Decoded audio buffer spec");
-
-                            // we need the sample rate to set up the audio device but
-                            // we only need it once because we're not gonna change it
-                            // ever again.
-                            if !rate_sent {
-                                rate_tx.send(spec.rate as usize).unwrap_or_log();
-                                rate_sent = true;
-                            }
-
                             let duration = audio_buf.capacity() as u64;
-                            tracing::info!(?duration, "Decoded audio buffer duration");
+
+                            tracing::info!(?spec, duration, "Decoded audio buffer");
+
+                            if !params_sent {
+                                params_tx
+                                    .send(AudioDeviceParams {
+                                        channel_count: spec.channels.count(),
+                                        sample_rate: spec.rate as usize,
+                                        channel_sample_count: spec.rate as usize / 10,
+                                    })
+                                    .unwrap_or_log();
+                                params_sent = true;
+                            }
 
                             sample_buf = Some(SampleBuffer::new(duration, spec));
                         }
