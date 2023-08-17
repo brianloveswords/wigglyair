@@ -1,91 +1,8 @@
-use std::{
-    io::Write,
-    str::FromStr,
-    sync::{atomic::Ordering, Arc},
-    thread,
-    time::Duration,
-};
+use std::{io::Write, sync::Arc, thread, time::Duration};
 
 use clap::Parser;
-use std::sync::atomic::AtomicU8;
-use tracing_unwrap::ResultExt;
-use wigglyair::configuration;
-
-#[derive(Debug)]
-enum VolumeError {
-    InvalidValue(u8),
-    InvalidString(String),
-}
-
-#[derive(Debug)]
-struct Volume(AtomicU8);
-
-impl Volume {
-    const MAX: u8 = 100;
-
-    fn unsafe_from(initial: u8) -> Self {
-        Self(AtomicU8::new(initial))
-    }
-
-    fn get(&self) -> u8 {
-        self.0.load(Ordering::Acquire)
-    }
-
-    fn set(&self, value: u8) -> Result<(), VolumeError> {
-        if value > Self::MAX {
-            Err(VolumeError::InvalidValue(value))
-        } else {
-            self.0.store(value, Ordering::Release);
-            Ok(())
-        }
-    }
-
-    fn set_from_string(&self, value: String) -> Result<(), VolumeError> {
-        let value: u8 = value
-            .trim()
-            .parse()
-            .map_err(|_| VolumeError::InvalidString(value))?;
-        self.set(value)
-    }
-}
-
-impl Default for Volume {
-    fn default() -> Self {
-        Self::unsafe_from(Self::MAX)
-    }
-}
-
-impl TryFrom<u8> for Volume {
-    type Error = VolumeError;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        if value > Self::MAX {
-            Err(VolumeError::InvalidValue(value))
-        } else {
-            Ok(Self::unsafe_from(value))
-        }
-    }
-}
-
-impl TryFrom<String> for Volume {
-    type Error = VolumeError;
-
-    fn try_from(value: String) -> Result<Self, Self::Error> {
-        let value: u8 = value
-            .trim()
-            .parse()
-            .map_err(|_| VolumeError::InvalidString(value))?;
-        Self::try_from(value)
-    }
-}
-
-impl FromStr for Volume {
-    type Err = VolumeError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        Self::try_from(value.to_string())
-    }
-}
+use tracing_unwrap::*;
+use wigglyair::{configuration, types::Volume};
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -98,8 +15,10 @@ async fn main() {
     let _guard = configuration::setup_tracing_async("testrig".into());
 
     let cli = Cli::parse();
-    let volume = Volume::try_from(cli.volume).expect_or_log("Could not parse volume");
-    let volume = Arc::new(volume);
+    let volume = {
+        let v = Volume::try_from(cli.volume).expect_or_log("Could not parse volume");
+        Arc::new(v)
+    };
 
     let vol1 = volume.clone();
     let h1 = thread::spawn(move || loop {
