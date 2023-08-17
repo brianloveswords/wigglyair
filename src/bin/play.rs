@@ -1,12 +1,13 @@
 use std::io::Write;
 use std::sync::Arc;
+use std::thread::JoinHandle;
 use std::time::Duration;
 use std::{fs::File, path::Path};
 use std::{io, thread};
 
 use audio_thread_priority::promote_current_thread_to_real_time;
 use clap::Parser;
-use crossbeam::channel::bounded;
+use crossbeam::channel::{bounded, Sender};
 use symphonia::core::errors::Error;
 use symphonia::core::{audio::SampleBuffer, io::MediaSourceStream, probe::Hint};
 use tinyaudio::prelude::*;
@@ -45,8 +46,57 @@ fn main() {
     // channel for the sample rate of the first track
     let (rate_tx, rate_rx) = bounded::<usize>(1);
 
-    let vol1 = volume.clone();
-    let _ = thread::spawn(move || loop {
+    let _ = start_volume_reader(volume.clone());
+    let file_reader = start_file_reader(files, rate_tx.clone(), samples_tx.clone());
+
+    let sample_rate = rate_rx.recv().unwrap_or_log();
+    tracing::info!(sample_rate, "Playing at {sample_rate} Hz");
+
+    let params = OutputDeviceParameters {
+        channels_count: CHANNEL_COUNT,
+        sample_rate,
+        channel_sample_count: sample_rate / 10,
+    };
+
+    let _device = run_output_device(params, {
+        let mut promoted = false;
+        let mut buf: Vec<f32> = Vec::new();
+        let vol1 = volume.clone();
+        move |data| {
+            if !promoted {
+                let tid = promote_current_thread_to_real_time(
+                    DEFAULT_AUDIO_BUFFER_FRAMES,
+                    sample_rate as u32,
+                )
+                .unwrap_or_log();
+                tracing::info!(?tid, "Thread promoted");
+                promoted = true;
+            }
+
+            let volume = vol1.get();
+            let size = data.len();
+            tracing::trace!(volume, size, "Writing samples");
+
+            while buf.len() < size {
+                let mut buf2: Vec<f32> = samples_rx
+                    .recv()
+                    .unwrap_or_log()
+                    .iter()
+                    .map(|s| s * (volume as f32 / 100.0))
+                    .collect();
+                buf.append(&mut buf2);
+            }
+            data.copy_from_slice(&buf[..size]);
+            buf.drain(..size);
+        }
+    })
+    .unwrap_or_log();
+
+    file_reader.join().unwrap_or_log();
+}
+
+fn start_volume_reader(volume: Arc<Volume>) -> JoinHandle<()> {
+    thread::spawn(move || loop {
         write!(std::io::stderr(), "> ").unwrap();
 
         let mut msg = String::new();
@@ -58,13 +108,19 @@ fn main() {
             println!();
             continue;
         }
-        match vol1.set_from_string(&msg) {
+        match volume.set_from_string(&msg) {
             Ok(()) => tracing::info!(volume = msg, "Setting volume"),
             Err(error) => tracing::error!(?error, "Error setting volume"),
         }
-    });
+    })
+}
 
-    let reader = thread::spawn(move || {
+fn start_file_reader(
+    files: Vec<String>,
+    rate_tx: Sender<usize>,
+    samples_tx: Sender<Vec<f32>>,
+) -> JoinHandle<()> {
+    thread::spawn(move || {
         let mut rate_sent = false;
         for file in files {
             let path = Path::new(&file);
@@ -163,50 +219,5 @@ fn main() {
                 }
             }
         }
-    });
-
-    let sample_rate = rate_rx.recv().unwrap_or_log();
-    tracing::info!(sample_rate, "Playing at {sample_rate} Hz");
-
-    let params = OutputDeviceParameters {
-        channels_count: CHANNEL_COUNT,
-        sample_rate,
-        channel_sample_count: sample_rate / 10,
-    };
-
-    let _device = run_output_device(params, {
-        let mut promoted = false;
-        let mut buf: Vec<f32> = Vec::new();
-        let vol1 = volume.clone();
-        move |data| {
-            if !promoted {
-                let tid = promote_current_thread_to_real_time(
-                    DEFAULT_AUDIO_BUFFER_FRAMES,
-                    sample_rate as u32,
-                )
-                .unwrap_or_log();
-                tracing::info!(?tid, "Thread promoted");
-                promoted = true;
-            }
-
-            let volume = vol1.get();
-            let size = data.len();
-            tracing::trace!(volume, size, "Writing samples");
-
-            while buf.len() < size {
-                let mut buf2: Vec<f32> = samples_rx
-                    .recv()
-                    .unwrap_or_log()
-                    .iter()
-                    .map(|s| s * (volume as f32 / 100.0))
-                    .collect();
-                buf.append(&mut buf2);
-            }
-            data.copy_from_slice(&buf[..size]);
-            buf.drain(..size);
-        }
     })
-    .unwrap_or_log();
-
-    reader.join().unwrap_or_log();
 }
