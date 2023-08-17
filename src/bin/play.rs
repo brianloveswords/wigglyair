@@ -1,3 +1,5 @@
+use std::io::Write;
+use std::sync::Arc;
 use std::time::Duration;
 use std::{fs::File, path::Path};
 use std::{io, thread};
@@ -10,6 +12,7 @@ use symphonia::core::{audio::SampleBuffer, io::MediaSourceStream, probe::Hint};
 use tinyaudio::prelude::*;
 use tracing_unwrap::*;
 use wigglyair::configuration;
+use wigglyair::types::Volume;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -18,24 +21,12 @@ struct Cli {
     files: Vec<String>,
 
     // volumne
-    #[clap(short, long, default_value = "1.0")]
-    volume: f32,
+    #[clap(short, long, default_value = "100")]
+    volume: u8,
 }
 
 const CHANNEL_COUNT: usize = 2;
 const DEFAULT_AUDIO_BUFFER_FRAMES: u32 = 0;
-
-struct Volume(f32);
-
-impl Volume {
-    fn new(volume: f32) -> Self {
-        assert!(
-            volume >= 0.0 && volume <= 1.0,
-            "Volume must be between 0.0 and 1.0"
-        );
-        Self(volume)
-    }
-}
 
 fn main() {
     // when this leaves scope the logs will be flushed
@@ -43,13 +34,34 @@ fn main() {
 
     let cli = Cli::parse();
     let files = cli.files;
-    let volume = Volume::new(cli.volume);
+    let volume = {
+        let v = Volume::try_from(cli.volume).expect_or_log("Could not parse volume");
+        Arc::new(v)
+    };
 
     // channel for buffers of samples
     let (samples_tx, samples_rx) = bounded::<Vec<f32>>(256);
 
     // channel for the sample rate of the first track
     let (rate_tx, rate_rx) = bounded::<usize>(1);
+
+    let vol1 = volume.clone();
+    let _ = thread::spawn(move || loop {
+        write!(std::io::stderr(), "> ").unwrap();
+
+        let mut msg = String::new();
+        if let Err(error) = std::io::stdin().read_line(&mut msg) {
+            tracing::error!("error reading line: {}", error);
+            break;
+        }
+        if msg == "" {
+            break;
+        }
+        match vol1.set_from_string(msg) {
+            Ok(()) => tracing::debug!(volume = vol1.get(), "set volume"),
+            Err(error) => tracing::error!("error setting volume: {:?}", error),
+        }
+    });
 
     let reader = thread::spawn(move || {
         let mut rate_sent = false;
@@ -165,8 +177,8 @@ fn main() {
     let _device = run_output_device(params, {
         let mut promoted = false;
         let mut buf: Vec<f32> = Vec::new();
+        let vol1 = volume.clone();
         move |data| {
-            let size = data.len();
             if !promoted {
                 let tid = promote_current_thread_to_real_time(
                     DEFAULT_AUDIO_BUFFER_FRAMES,
@@ -176,12 +188,17 @@ fn main() {
                 tracing::info!(?tid, "Thread promoted");
                 promoted = true;
             }
+
+            let volume = vol1.get();
+            let size = data.len();
+            tracing::trace!(volume, size, "Writing samples");
+
             while buf.len() < size {
                 let mut buf2: Vec<f32> = samples_rx
                     .recv()
                     .unwrap_or_log()
                     .iter()
-                    .map(|s| s * volume.0)
+                    .map(|s| s * (volume as f32 / 100.0))
                     .collect();
                 buf.append(&mut buf2);
             }
