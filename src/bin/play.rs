@@ -92,7 +92,7 @@ fn main() {
     };
     let play_state = Arc::new(PlayState::default());
 
-    let (samples_tx, samples_rx) = bounded::<Vec<f32>>(256);
+    let (samples_tx, samples_rx) = bounded::<Vec<f32>>(128);
     let (params_tx, params_rx) = bounded::<AudioParams>(1);
 
     let _ = start_volume_reader(volume.clone(), play_state.clone());
@@ -140,6 +140,7 @@ fn main() {
                     .collect();
                 buf.append(&mut tmp);
             }
+
             tracing::trace!(volume, size, "Rendering samples");
             data.copy_from_slice(&buf[..size]);
             buf.drain(..size);
@@ -272,7 +273,7 @@ fn start_file_reader(
                                     // if the buffer is full, wait for a bit. this lets us
                                     // batch reads, which seems to be more efficient.
                                     Err(err) if err.is_full() => {
-                                        thread::sleep(Duration::from_secs(8));
+                                        thread::sleep(Duration::from_secs(4));
                                     }
                                     Ok(_) => {
                                         tracing::trace!("Sent samples");
