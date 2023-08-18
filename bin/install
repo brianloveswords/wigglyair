@@ -5,8 +5,8 @@ set -euo pipefail
 function main() {
     local bin_name="$1"
 
-    cargo build --release
-    cp "target/release/${bin_name}" "${HOME}/bin/${bin_name}"
+    bin/build-release
+    cp "target/aarch64-apple-darwin/release/${bin_name}" "${HOME}/bin/${bin_name}"
 }
 
 main "${@}"

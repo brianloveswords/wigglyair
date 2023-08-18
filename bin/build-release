@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+function main() {
+    cargo +nightly build -Z build-std=std,panic_abort --target aarch64-apple-darwin --release
+}
+
+main "$@"
