@@ -1,38 +1,28 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
-use std::sync::{
-    atomic::{AtomicU64, Ordering},
-    Arc, Mutex,
-};
-
 #[inline]
-fn _atomic(a: Arc<AtomicU64>) -> u64 {
-    a.fetch_add(1, Ordering::SeqCst)
+fn copy_buf(data: &mut [f32], buf: Vec<f32>) {
+    let size = data.len();
+    let mut buf: Vec<f32> = buf.iter().map(|s| s * 0.5).collect();
+    data.copy_from_slice(&buf[..size]);
+    buf.drain(..size);
 }
 
-fn _primitive(a: u64) -> u64 {
-    a + 1
-}
-
-fn _mutex(a: Arc<Mutex<u64>>) -> u64 {
-    let mut a = a.lock().unwrap();
-    *a += 1;
-    *a
-}
-
-#[inline]
-fn locking(a: u64) -> u64 {
-    _atomic(Arc::new(AtomicU64::new(a)))
-}
-
-fn bench_locking(c: &mut Criterion) {
-    c.bench_function("atomic", |b| b.iter(|| locking(black_box(20))));
+fn bench_copy_buf(c: &mut Criterion) {
+    c.bench_function("copy_buf", |b| {
+        b.iter(|| {
+            copy_buf(
+                black_box(&mut [0.0f32; 8192]),
+                black_box(vec![1.0f32; 9000]),
+            )
+        })
+    });
 }
 
 criterion_group! {
     name = benches;
     config = Criterion::default();
-    targets = bench_locking
+    targets = bench_copy_buf
 }
 
 criterion_main!(benches);
