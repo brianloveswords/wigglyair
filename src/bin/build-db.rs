@@ -104,8 +104,9 @@ async fn main() {
                 path,
                 last_modified,
                 file_size,
-                track_length,
                 sample_rate,
+                total_samples,
+                length_secs,
                 channels,
                 max_block_size,
                 album,
@@ -114,7 +115,7 @@ async fn main() {
                 album_artist,
                 track
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
         ";
         while let Ok(msg) = writer_rx.recv() {
             match msg {
@@ -131,8 +132,9 @@ async fn main() {
                                 track.path.to_str().unwrap_or_log(),
                                 track.last_modified,
                                 track.file_size,
-                                track.track_length,
                                 track.sample_rate,
+                                track.total_samples,
+                                track.length_secs,
                                 track.channels,
                                 track.max_block_size,
                                 track.album,
