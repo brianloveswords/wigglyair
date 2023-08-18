@@ -101,28 +101,30 @@ fn main() {
     let params = params_rx.recv().unwrap_or_log();
     tracing::info!(?params, "Setting up audio device");
     let _device = run_output_device(params.into(), {
-        // keep track of whether this thread was already promoted to real time
-        let mut promoted = false;
-
-        // buffer to store samples that are ready to be played
+        // buffer to store samples that are ready to be played. we'll resize it to
+        // the have enough capacity to hold what we need without reallocating.
         let mut buf: Vec<f32> = Vec::new();
-
         let volume = volume.clone();
+
+        let mut initialized = false;
         move |data| {
-            if !promoted {
+            if !initialized {
                 let tid = promote_current_thread_to_real_time(
                     params.audio_buffer_frames(),
                     params.sample_rate as u32,
                 )
                 .unwrap_or_log();
                 tracing::info!(?tid, "Thread promoted");
-                promoted = true;
+
+                buf = Vec::with_capacity(data.len() * 2);
+                initialized = true;
             }
 
             let size = data.len();
 
             // if we're paused, fill the buffer with zeros and get outta here
-            // TODO: would it be better to create the 0 vec just once somewhere?
+            // I tested just in case: using `fill` is about twice as fast as
+            // using a static pile of zeroes and `copy_from_slice`.
             if play_state.is_paused() {
                 data.fill(0.0);
                 return;
@@ -140,7 +142,6 @@ fn main() {
                 buf.append(&mut tmp);
             }
 
-            tracing::trace!(volume, size, "Rendering samples");
             data.copy_from_slice(&buf[..size]);
             buf.drain(..size);
         }
