@@ -124,8 +124,7 @@ fn main() {
             // if we're paused, fill the buffer with zeros and get outta here
             // TODO: would it be better to create the 0 vec just once somewhere?
             if play_state.is_paused() {
-                let zeros = vec![0.0f32; size];
-                data.copy_from_slice(&zeros[..]);
+                data.fill(0.0);
                 return;
             }
 
