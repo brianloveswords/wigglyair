@@ -2303,6 +2303,7 @@ dependencies = [
  "crossbeam",
  "futures",
  "metaflac",
+ "once_cell",
  "rusqlite",
  "rusqlite_migration",
  "serde",
