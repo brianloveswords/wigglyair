@@ -16,6 +16,7 @@ pub struct TrackMetadata {
     pub track_length: u32,
     pub sample_rate: u32,
     pub channels: u8,
+    pub max_block_size: u16,
     pub album: String,
     pub artist: String,
     pub title: String,
@@ -101,6 +102,8 @@ impl TrackMetadata {
             .get_streaminfo()
             .ok_or(TrackMetadataError::InvalidStreamInfo { path: path.clone() })?;
 
+        let max_block_size = streaminfo.max_block_size;
+
         let comments =
             read_comments(&tag).ok_or(TrackMetadataError::MissingComment { path: path.clone() })?;
 
@@ -142,6 +145,7 @@ impl TrackMetadata {
             track_length,
             sample_rate,
             channels,
+            max_block_size,
             album,
             artist,
             title,

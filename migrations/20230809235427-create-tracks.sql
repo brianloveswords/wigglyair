@@ -5,6 +5,7 @@ CREATE TABLE tracks(
     track_length INTEGER NOT NULL,
     sample_rate INTEGER NOT NULL,
     channels INTEGER NOT NULL,
+    max_block_size INTEGER NOT NULL,
     album TEXT NOT NULL,
     artist TEXT NOT NULL,
     title TEXT NOT NULL,

@@ -107,13 +107,14 @@ async fn main() {
                 track_length,
                 sample_rate,
                 channels,
+                max_block_size,
                 album,
                 artist,
                 title,
                 album_artist,
                 track
             )
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
         ";
         while let Ok(msg) = writer_rx.recv() {
             match msg {
@@ -133,6 +134,7 @@ async fn main() {
                                 track.track_length,
                                 track.sample_rate,
                                 track.channels,
+                                track.max_block_size,
                                 track.album,
                                 track.artist,
                                 track.title,
