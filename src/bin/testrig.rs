@@ -1,20 +1,41 @@
 use std::{
     error::Error,
     io::{self, Stdout},
+    path::Path,
     time::Duration,
 };
 
 use anyhow::Result;
+use clap::Parser;
 use crossterm::{
     event::{self, Event, KeyCode, KeyEvent},
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use itertools::Itertools;
 use ratatui::{prelude::*, widgets::*};
+// use rusqlite::{Connection, Result as SqlResult};
+
+#[derive(Parser)]
+#[command(author, version, about, long_about = None)]
+struct Cli {
+    #[clap(help = "Files to play. Must be flac")]
+    files: Vec<String>,
+}
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
+    let files = cli
+        .files
+        .iter()
+        .map(|f| Path::new(f))
+        .filter(|p| p.exists() && p.extension().unwrap_or_default() == "flac")
+        .map(|p| p.file_name().unwrap().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    assert!(!files.is_empty(), "No files to play");
+
     let mut terminal = setup_terminal()?;
-    run(&mut terminal)?;
+    run(&mut terminal, files)?;
     restore_terminal(&mut terminal)?;
     Ok(())
 }
@@ -34,7 +55,10 @@ fn restore_terminal(
     Ok(terminal.show_cursor()?)
 }
 
-fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Box<dyn Error>> {
+fn run(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    files: Vec<String>,
+) -> Result<(), Box<dyn Error>> {
     let mut volume = 100i16;
     Ok(loop {
         terminal.draw(|f| {
@@ -56,20 +80,25 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Box<dyn 
                 .percent(volume as u16);
             f.render_widget(gauge, chunks[0]);
 
-            let block = Block::default().title("🎶🎶🎶").borders(Borders::ALL);
-            let items = [
-                ListItem::new("Item 1"),
-                ListItem::new("Item 2").set_style(Style::default().fg(Color::Green).bold()),
-                ListItem::new("Item 3"),
-            ];
+            let items = files
+                .iter()
+                .map(|f| ListItem::new(f.as_str()))
+                .enumerate()
+                .map(|(i, mut li)| {
+                    if i == 3 {
+                        li = li.style(Style::default().fg(Color::Green).bold());
+                    }
+                    li
+                })
+                .collect_vec();
             let list = List::new(items)
-                .block(block)
+                .block(Block::default().borders(Borders::ALL))
                 .style(Style::default().fg(Color::White));
             f.render_widget(list, chunks[1]);
 
             let gauge = Gauge::default()
                 .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black))
-                .percent(volume as u16);
+                .ratio(0.35);
             f.render_widget(gauge, chunks[2]);
         })?;
 
