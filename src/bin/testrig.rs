@@ -37,11 +37,49 @@ fn restore_terminal(
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Box<dyn Error>> {
     let mut volume = 0i32;
     Ok(loop {
-        terminal.draw(|frame| {
-            let greeting = Paragraph::new(format!("volume={}", volume));
-            frame.render_widget(greeting, frame.size());
+        terminal.draw(|f| {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(1)
+                .constraints([Constraint::Length(4), Constraint::Length(1)].as_ref())
+                .split(f.size());
+            let top_chunks = Layout::default()
+                .direction(Direction::Horizontal)
+                .margin(1)
+                .constraints([Constraint::Length(8), Constraint::Length(1)].as_ref())
+                .split(chunks[0]);
+
+            // put volume in top left chunk
+            let text = vec![
+                Line::from(vec![Span::raw("volume")]),
+                Line::from(vec![Span::styled(
+                    format!("{:02}", volume),
+                    Style::default().fg(Color::Red),
+                )]),
+            ];
+            let paragraph = Paragraph::new(text).alignment(Alignment::Center);
+            f.render_widget(paragraph, top_chunks[0]);
+
+            let text = vec![
+                Line::from(vec![
+                    Span::raw("First "),
+                    Span::styled("line", Style::default().add_modifier(Modifier::ITALIC)),
+                    Span::raw("."),
+                ]),
+                Line::from(Span::styled("Second line", Style::default().fg(Color::Red))),
+            ];
+            let paragraph = Paragraph::new(text)
+                .block(Block::default().title("Paragraph").borders(Borders::ALL))
+                .style(Style::default().fg(Color::White).bg(Color::Black))
+                .alignment(Alignment::Center)
+                .wrap(Wrap { trim: true });
+            f.render_widget(paragraph, top_chunks[1]);
+
+            let block = Block::default().title("🎶🎶🎶").borders(Borders::ALL);
+            f.render_widget(block, chunks[1]);
         })?;
-        if event::poll(Duration::from_millis(250))? {
+
+        if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => break,
