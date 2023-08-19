@@ -35,48 +35,42 @@ fn restore_terminal(
 }
 
 fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Box<dyn Error>> {
-    let mut volume = 0i32;
+    let mut volume = 100i16;
     Ok(loop {
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(1)
-                .constraints([Constraint::Length(4), Constraint::Length(1)].as_ref())
+                .constraints(
+                    [
+                        Constraint::Length(1),
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                    ]
+                    .as_ref(),
+                )
                 .split(f.size());
-            let top_chunks = Layout::default()
-                .direction(Direction::Horizontal)
-                .margin(1)
-                .constraints([Constraint::Length(8), Constraint::Length(1)].as_ref())
-                .split(chunks[0]);
 
-            // put volume in top left chunk
-            let text = vec![
-                Line::from(vec![Span::raw("volume")]),
-                Line::from(vec![Span::styled(
-                    format!("{:02}", volume),
-                    Style::default().fg(Color::Red),
-                )]),
-            ];
-            let paragraph = Paragraph::new(text).alignment(Alignment::Center);
-            f.render_widget(paragraph, top_chunks[0]);
-
-            let text = vec![
-                Line::from(vec![
-                    Span::raw("First "),
-                    Span::styled("line", Style::default().add_modifier(Modifier::ITALIC)),
-                    Span::raw("."),
-                ]),
-                Line::from(Span::styled("Second line", Style::default().fg(Color::Red))),
-            ];
-            let paragraph = Paragraph::new(text)
-                .block(Block::default().title("Paragraph").borders(Borders::ALL))
-                .style(Style::default().fg(Color::White).bg(Color::Black))
-                .alignment(Alignment::Center)
-                .wrap(Wrap { trim: true });
-            f.render_widget(paragraph, top_chunks[1]);
+            let gauge = Gauge::default()
+                .gauge_style(Style::default().fg(Color::Magenta).bg(Color::Black))
+                .percent(volume as u16);
+            f.render_widget(gauge, chunks[0]);
 
             let block = Block::default().title("🎶🎶🎶").borders(Borders::ALL);
-            f.render_widget(block, chunks[1]);
+            let items = [
+                ListItem::new("Item 1"),
+                ListItem::new("Item 2").set_style(Style::default().fg(Color::Green).bold()),
+                ListItem::new("Item 3"),
+            ];
+            let list = List::new(items)
+                .block(block)
+                .style(Style::default().fg(Color::White));
+            f.render_widget(list, chunks[1]);
+
+            let gauge = Gauge::default()
+                .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black))
+                .percent(volume as u16);
+            f.render_widget(gauge, chunks[2]);
         })?;
 
         if event::poll(Duration::from_millis(200))? {
@@ -99,7 +93,7 @@ fn run(terminal: &mut Terminal<CrosstermBackend<Stdout>>) -> Result<(), Box<dyn 
     })
 }
 
-fn volume_modifier(key: KeyEvent) -> i32 {
+fn volume_modifier(key: KeyEvent) -> i16 {
     if is_holding_shift(key) {
         10
     } else {
