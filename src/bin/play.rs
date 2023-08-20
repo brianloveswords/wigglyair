@@ -27,7 +27,7 @@ struct Cli {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
-    let _guard = configuration::setup_tracing_async("testrig".into());
+    let _guard = configuration::setup_tracing_async("play".into());
 
     let cli = Cli::parse();
     let tracks: TrackList = TrackList::from_files(cli.files);
