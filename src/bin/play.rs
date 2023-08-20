@@ -13,7 +13,7 @@ use symphonia::core::{audio::SampleBuffer, io::MediaSourceStream, probe::Hint};
 use tinyaudio::prelude::*;
 use tracing_unwrap::*;
 use wigglyair::configuration;
-use wigglyair::types::Volume;
+use wigglyair::types::{AudioParams, Volume};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -24,36 +24,6 @@ struct Cli {
     // volumne
     #[clap(short, long, default_value = "100")]
     volume: u8,
-}
-
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-struct AudioParams {
-    duration: usize,
-    channel_count: usize,
-    sample_rate: usize,
-}
-
-impl AudioParams {
-    const DEFAULT_AUDIO_BUFFER_FRAMES: u32 = 0;
-
-    fn audio_buffer_frames(&self) -> u32 {
-        Self::DEFAULT_AUDIO_BUFFER_FRAMES
-    }
-
-    fn channel_sample_count(&self) -> usize {
-        self.sample_rate / 10
-    }
-}
-
-impl From<AudioParams> for OutputDeviceParameters {
-    fn from(other: AudioParams) -> Self {
-        Self {
-            channels_count: other.channel_count,
-            sample_rate: other.sample_rate,
-            channel_sample_count: other.channel_sample_count(),
-        }
-    }
 }
 
 struct PlayState(AtomicBool);
@@ -255,7 +225,6 @@ fn start_file_reader(
                             if !params_sent {
                                 params_tx
                                     .send(AudioParams {
-                                        duration,
                                         channel_count,
                                         sample_rate,
                                     })

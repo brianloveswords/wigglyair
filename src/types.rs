@@ -1,5 +1,8 @@
 use crate::configuration::Settings;
+use itertools::FoldWhile::*;
+use itertools::Itertools;
 use serde::Serialize;
+use std::path::PathBuf;
 use std::{
     str::FromStr,
     sync::{
@@ -7,6 +10,7 @@ use std::{
         Arc,
     },
 };
+use tinyaudio::OutputDeviceParameters;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -19,6 +23,10 @@ pub type SharedState = Arc<AppState>;
 pub struct DebugResponse {
     pub paths: Vec<String>,
 }
+
+//
+// Volume
+//
 
 #[derive(Debug)]
 pub enum VolumeError {
@@ -116,6 +124,109 @@ impl FromStr for Volume {
         Self::try_from(value.to_string())
     }
 }
+
+//
+// Audio Params
+//
+
+#[derive(Debug, Clone, Copy)]
+pub struct AudioParams {
+    pub channel_count: usize,
+    pub sample_rate: usize,
+}
+
+impl AudioParams {
+    const DEFAULT_AUDIO_BUFFER_FRAMES: u32 = 0;
+
+    pub fn audio_buffer_frames(&self) -> u32 {
+        Self::DEFAULT_AUDIO_BUFFER_FRAMES
+    }
+
+    pub fn channel_sample_count(&self) -> usize {
+        self.sample_rate / 10
+    }
+}
+
+impl From<AudioParams> for OutputDeviceParameters {
+    fn from(other: AudioParams) -> Self {
+        Self {
+            channels_count: other.channel_count,
+            sample_rate: other.sample_rate,
+            channel_sample_count: other.channel_sample_count(),
+        }
+    }
+}
+
+//
+// TrackList
+//
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Track {
+    pub path: PathBuf,
+    pub samples: u64,
+    pub channels: u8,
+}
+
+#[derive(Debug)]
+pub struct TrackList {
+    pub tracks: Vec<Track>,
+    pub total_samples: u64,
+}
+
+impl TrackList {
+    pub fn new() -> Self {
+        Self {
+            tracks: Vec::new(),
+            total_samples: 0,
+        }
+    }
+
+    pub fn add_track(&mut self, track: Track) {
+        self.total_samples += track.samples;
+        self.tracks.push(track);
+    }
+
+    pub fn add_tracks(&mut self, tracks: Vec<Track>) {
+        self.total_samples += tracks.iter().map(|t| t.samples).sum::<u64>();
+        self.tracks.extend(tracks);
+    }
+
+    pub fn find_playing(&self, current_sample: u64) -> &Track {
+        let (found, _) = self
+            .tracks
+            .iter()
+            .enumerate()
+            .fold_while((0usize, 0u64), |(i, mut total), (j, track)| {
+                total += track.samples;
+                if total > current_sample {
+                    Done((i, total))
+                } else {
+                    Continue((j, total))
+                }
+            })
+            .into_inner();
+        &self.tracks[found]
+    }
+}
+
+impl Default for TrackList {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Into<TrackList> for Vec<Track> {
+    fn into(self) -> TrackList {
+        let mut tl = TrackList::new();
+        tl.add_tracks(self);
+        tl
+    }
+}
+
+//
+// tests
+//
 
 #[cfg(test)]
 mod tests {

@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     io::{self, Stdout},
-    path::{Path, PathBuf},
+    path::Path,
     rc::Rc,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -18,11 +18,10 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use itertools::FoldWhile::*;
 use itertools::Itertools;
 use metaflac::Tag;
 use ratatui::{prelude::*, widgets::*};
-use wigglyair::types::Volume;
+use wigglyair::types::{Track, TrackList, Volume};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -188,67 +187,4 @@ fn is_holding_shift(key: KeyEvent) -> bool {
 
 fn is_holding_ctrl(key: KeyEvent) -> bool {
     key.modifiers.contains(event::KeyModifiers::CONTROL)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-struct Track {
-    path: PathBuf,
-    samples: u64,
-    channels: u8,
-}
-
-struct TrackList {
-    tracks: Vec<Track>,
-    total_samples: u64,
-}
-
-#[allow(dead_code)]
-impl TrackList {
-    fn new() -> Self {
-        Self {
-            tracks: Vec::new(),
-            total_samples: 0,
-        }
-    }
-
-    fn add_track(&mut self, track: Track) {
-        self.total_samples += track.samples;
-        self.tracks.push(track);
-    }
-
-    fn add_tracks(&mut self, tracks: Vec<Track>) {
-        self.total_samples += tracks.iter().map(|t| t.samples).sum::<u64>();
-        self.tracks.extend(tracks);
-    }
-
-    fn find_playing(&self, current_sample: u64) -> &Track {
-        let (found, _) = self
-            .tracks
-            .iter()
-            .enumerate()
-            .fold_while((0usize, 0u64), |(i, mut total), (j, track)| {
-                total += track.samples;
-                if total > current_sample {
-                    Done((i, total))
-                } else {
-                    Continue((j, total))
-                }
-            })
-            .into_inner();
-        &self.tracks[found]
-    }
-}
-
-impl Default for TrackList {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Into<TrackList> for Vec<Track> {
-    fn into(self) -> TrackList {
-        let mut tl = TrackList::new();
-        tl.add_tracks(self);
-        tl
-    }
 }
