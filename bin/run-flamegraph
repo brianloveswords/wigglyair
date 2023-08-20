@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+function main() {
+    local bin="$1"
+    shift
+    cargo flamegraph --profile=profiling --root --bin "${bin}" -- "${@}"
+}
+
+main "$@"

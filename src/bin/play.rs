@@ -1,245 +1,170 @@
-use std::sync::Arc;
-use std::thread::JoinHandle;
-use std::time::Duration;
-use std::{fs::File, path::Path};
-use std::{io, thread};
+use std::{
+    error::Error,
+    io::{self, Stdout},
+    sync::{atomic::Ordering, Arc},
+    time::Duration,
+};
 
-use audio_thread_priority::promote_current_thread_to_real_time;
+use anyhow::Result;
 use clap::Parser;
-use crossbeam::channel::{bounded, Sender};
-use symphonia::core::errors::Error;
-use symphonia::core::{audio::SampleBuffer, io::MediaSourceStream, probe::Hint};
-use tinyaudio::prelude::*;
-use tracing_unwrap::*;
-use wigglyair::configuration;
-use wigglyair::types::{AudioParams, PlayState, Volume};
+use crossterm::{
+    event::{self, Event, KeyCode, KeyEvent},
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
+use itertools::Itertools;
+use ratatui::{prelude::*, widgets::*};
+use wigglyair::{
+    configuration,
+    types::{AudioParams, Player, TrackList},
+};
 
-#[derive(Parser, Debug)]
+#[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
     #[clap(help = "Files to play. Must be flac")]
     files: Vec<String>,
-
-    // volumne
-    #[clap(short, long, default_value = "100")]
-    volume: u8,
 }
 
-fn main() {
-    // when this leaves scope the logs will be flushed
-    let _guard = configuration::setup_tracing_async("play".into());
+fn main() -> Result<(), Box<dyn Error>> {
+    let _guard = configuration::setup_tracing_async("testrig".into());
 
     let cli = Cli::parse();
-    let files = cli.files;
-    let volume = {
-        let v = Volume::try_from(cli.volume).expect_or_log("Could not parse volume");
-        Arc::new(v)
-    };
-    let play_state = Arc::new(PlayState::default());
+    let tracks: TrackList = TrackList::from_files(cli.files);
+    let params: AudioParams = tracks.audio_params();
 
-    let (samples_tx, samples_rx) = bounded::<Vec<f32>>(128);
-    let (params_tx, params_rx) = bounded::<AudioParams>(1);
+    tracing::info!("Audio params {:?}", params);
+    tracing::info!("Playing {:?}", tracks);
 
-    let _ = start_volume_reader(volume.clone(), play_state.clone());
-    let file_reader = start_file_reader(files, params_tx.clone(), samples_tx.clone());
+    let mut terminal = setup_terminal()?;
+    let player = Player::new(tracks);
+    run_tui(&mut terminal, player)?;
+    restore_terminal(&mut terminal)?;
+    Ok(())
+}
 
-    let params = params_rx.recv().unwrap_or_log();
-    tracing::info!(?params, "Setting up audio device");
-    let _device = run_output_device(params.output_device_parameters(), {
-        // buffer to store samples that are ready to be played. we'll resize it to
-        // the have enough capacity to hold what we need without reallocating.
-        let mut buf: Vec<f32> = Vec::new();
-        let volume = volume.clone();
+fn setup_terminal() -> Result<Terminal<CrosstermBackend<Stdout>>, Box<dyn Error>> {
+    let mut stdout = io::stdout();
+    enable_raw_mode()?;
+    execute!(stdout, EnterAlternateScreen)?;
+    Ok(Terminal::new(CrosstermBackend::new(stdout))?)
+}
 
-        let mut initialized = false;
-        move |data| {
-            if !initialized {
-                let tid = promote_current_thread_to_real_time(
-                    params.audio_buffer_frames(),
-                    params.sample_rate as u32,
+fn restore_terminal(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+) -> Result<(), Box<dyn Error>> {
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen,)?;
+    Ok(terminal.show_cursor()?)
+}
+
+fn run_tui(
+    terminal: &mut Terminal<CrosstermBackend<Stdout>>,
+    player: Player,
+) -> Result<(), Box<dyn Error>> {
+    let tracks = Arc::clone(&player.track_list);
+    let current_sample = Arc::clone(&player.current_sample);
+    let volume = Arc::clone(&player.volume);
+    let total_samples = tracks.total_samples;
+    let current_track = Arc::clone(&player.current_track);
+    let play_state = Arc::clone(&player.state);
+
+    player.start();
+
+    Ok(loop {
+        let current_sample = current_sample.load(Ordering::SeqCst);
+        let ratio = (current_sample as f64 / total_samples as f64).clamp(0.0, 1.0);
+        let is_paused = play_state.is_paused();
+        terminal.draw(|f| {
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .margin(1)
+                .constraints(
+                    [
+                        Constraint::Length(1),
+                        Constraint::Min(1),
+                        Constraint::Length(1),
+                    ]
+                    .as_ref(),
                 )
-                .unwrap_or_log();
-                tracing::info!(?tid, "Thread promoted");
+                .split(f.size());
 
-                buf = Vec::with_capacity(data.len() * 2);
-                initialized = true;
+            // volume
+            let mut style = Style::default().bg(Color::Black).fg(Color::Magenta);
+            if is_paused {
+                style = style.fg(Color::Red);
             }
-
-            let size = data.len();
-
-            // if we're paused, fill the buffer with zeros and get outta here
-            // I tested just in case: using `fill` is about twice as fast as
-            // using a static pile of zeroes and `copy_from_slice`.
-            if play_state.is_paused() {
-                data.fill(0.0);
-                return;
+            let value = volume.get() as u16;
+            let mut gauge = Gauge::default().gauge_style(style).percent(value);
+            if is_paused {
+                gauge = gauge.label("[paused]");
             }
+            f.render_widget(gauge, chunks[0]);
 
-            let volume = volume.get();
+            // track list
+            let current_track = current_track.load(Ordering::SeqCst);
+            let items = tracks
+                .tracks
+                .iter()
+                .enumerate()
+                .map(|(i, t)| {
+                    let style = Style::default();
+                    let style = if i == current_track {
+                        style.fg(Color::Green).bold()
+                    } else {
+                        style.fg(Color::White)
+                    };
+                    ListItem::new(t.path.file_name().unwrap().to_string_lossy()).style(style)
+                })
+                .collect_vec();
+            let list = List::new(items)
+                .block(Block::default().borders(Borders::ALL))
+                .style(Style::default().fg(Color::White));
+            f.render_widget(list, chunks[1]);
 
-            while buf.len() < size {
-                let mut tmp = samples_rx
-                    .recv()
-                    .unwrap_or_log()
-                    .iter()
-                    .map(|s| s * (volume as f32 / 100.0))
-                    .collect();
-                buf.append(&mut tmp);
-            }
+            // sample progress
+            let gauge = Gauge::default()
+                .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black))
+                .ratio(ratio)
+                .label(format!("{} / {}", current_sample, total_samples));
+            f.render_widget(gauge, chunks[2]);
+        })?;
 
-            data.copy_from_slice(&buf[..size]);
-            buf.drain(..size);
-        }
-    })
-    .unwrap_or_log();
-
-    file_reader.join().unwrap_or_log();
-}
-
-fn start_volume_reader(volume: Arc<Volume>, play_state: Arc<PlayState>) -> JoinHandle<()> {
-    thread::spawn(move || loop {
-        eprint!("> ");
-
-        let mut msg = String::new();
-        if let Err(error) = std::io::stdin().read_line(&mut msg) {
-            tracing::error!("Error reading line: {}", error);
-            break;
-        }
-        let command_line = msg.trim().split_whitespace().collect::<Vec<_>>();
-        let command = match command_line.get(0) {
-            Some(command) => *command,
-            None => continue,
-        };
-
-        let tail = command_line[1..].to_vec();
-        match command {
-            "" => continue,
-            "v" => {
-                let value = tail.get(0).unwrap_or(&"");
-                match volume.set_from_string(value) {
-                    Ok(()) => tracing::info!(volume = value, "Setting volume"),
-                    Err(error) => tracing::error!(?error, "Error setting volume"),
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Char('p') => {
+                        play_state.toggle();
+                    }
+                    KeyCode::Char('c') if is_holding_ctrl(key) => break,
+                    KeyCode::Up => {
+                        let n = volume_modifier(key);
+                        volume.up(n);
+                    }
+                    KeyCode::Down => {
+                        let n = volume_modifier(key);
+                        volume.down(n);
+                    }
+                    _ => {}
                 }
             }
-            "p" => {
-                let playing = !play_state.toggle();
-                tracing::info!(playing, "{}", if playing { "Playing" } else { "Pausing" });
-            }
-            _ => {}
-        };
-
-        if msg == "" {
-            eprintln!();
-            continue;
         }
     })
 }
 
-fn start_file_reader(
-    files: Vec<String>,
-    params_tx: Sender<AudioParams>,
-    samples_tx: Sender<Vec<f32>>,
-) -> JoinHandle<()> {
-    thread::spawn(move || {
-        let mut params_sent = false;
-        for file in files {
-            let path = Path::new(&file);
-            if path.extension().unwrap_or_default() != "flac" {
-                tracing::warn!(?path, "Skipping non-flac file");
-                continue;
-            }
+fn volume_modifier(key: KeyEvent) -> u8 {
+    if is_holding_shift(key) {
+        10
+    } else {
+        1
+    }
+}
 
-            tracing::info!(audio_file = file, "Reading audio file");
+fn is_holding_shift(key: KeyEvent) -> bool {
+    key.modifiers.contains(event::KeyModifiers::SHIFT)
+}
 
-            let probed = {
-                let file = Box::new(File::open(path).unwrap_or_log());
-                symphonia::default::get_probe()
-                    .format(
-                        &Hint::new(),
-                        MediaSourceStream::new(file, Default::default()),
-                        &Default::default(),
-                        &Default::default(),
-                    )
-                    .unwrap_or_log()
-            };
-
-            let mut format = probed.format;
-            let track = format.default_track().unwrap_or_log();
-
-            let mut decoder = symphonia::default::get_codecs()
-                .make(&track.codec_params, &Default::default())
-                .unwrap_or_log();
-
-            let track_id = track.id;
-
-            let mut sample_buf = None;
-            loop {
-                let packet = match format.next_packet() {
-                    Ok(packet) => packet,
-                    Err(Error::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
-                    Err(err) => {
-                        tracing::error!(?err, file, "Error reading packet");
-                        break;
-                    }
-                };
-
-                if packet.track_id() != track_id {
-                    continue;
-                }
-
-                match decoder.decode(&packet) {
-                    Ok(audio_buf) => {
-                        if sample_buf.is_none() {
-                            let spec = *audio_buf.spec();
-                            let duration = audio_buf.capacity();
-                            let channel_count = spec.channels.count();
-                            let sample_rate = spec.rate as usize;
-
-                            tracing::info!(?spec, "Decoded audio buffer");
-
-                            if !params_sent {
-                                params_tx
-                                    .send(AudioParams {
-                                        channel_count,
-                                        sample_rate,
-                                    })
-                                    .unwrap_or_log();
-                                params_sent = true;
-                            }
-
-                            sample_buf = Some(SampleBuffer::new(duration as u64, spec));
-                        }
-
-                        if let Some(buf) = &mut sample_buf {
-                            buf.copy_interleaved_ref(audio_buf);
-                            loop {
-                                match samples_tx.try_send(buf.samples().to_owned()) {
-                                    // if the buffer is full, wait for a bit. this lets us
-                                    // batch reads, which seems to be more efficient.
-                                    Err(err) if err.is_full() => {
-                                        thread::sleep(Duration::from_secs(4));
-                                    }
-                                    Ok(_) => {
-                                        tracing::trace!("Sent samples");
-                                        break;
-                                    }
-                                    Err(err) => {
-                                        tracing::error!(?err, "Error sending samples");
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Err(Error::DecodeError(err)) => {
-                        tracing::error!(err, "Audio loop: decode error")
-                    }
-                    Err(err) => {
-                        tracing::error!(%err, "Audio loop: error");
-                        break;
-                    }
-                }
-            }
-        }
-    })
+fn is_holding_ctrl(key: KeyEvent) -> bool {
+    key.modifiers.contains(event::KeyModifiers::CONTROL)
 }

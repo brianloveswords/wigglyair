@@ -250,17 +250,15 @@ impl TrackList {
         self.tracks.extend(tracks);
     }
 
-    // TODO: this is horribly inefficient for how much it's in the hot path
-    // we need to cache the start
     pub fn find_playing(&self, current_sample: u64) -> usize {
         let (found, _) = self
             .tracks
             .iter()
             .enumerate()
-            .fold_while((0usize, 0u64), |(i, mut total), (j, track)| {
+            .fold_while((0usize, 0u64), |(_, mut total), (j, track)| {
                 total += track.samples;
                 if total > current_sample {
-                    Done((i, total))
+                    Done((j, total))
                 } else {
                     Continue((j, total))
                 }
