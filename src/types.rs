@@ -244,12 +244,12 @@ impl TrackList {
             .tracks
             .iter()
             .enumerate()
-            .fold_while((0usize, 0u64), |(_, mut total), (j, track)| {
+            .fold_while((0usize, 0u64), |(_, mut total), (i, track)| {
                 total += track.samples;
                 if total > current_sample {
-                    Done((j, total))
+                    Done((i, total))
                 } else {
-                    Continue((j, total))
+                    Continue((i, total))
                 }
             })
             .into_inner();
@@ -269,10 +269,20 @@ impl TrackList {
             .map(|t| t.sample_rate)
             .collect::<HashSet<_>>();
 
+        // TODO: don't panic, warn the user of the problem and give them
+        // a suggestion on how to fix it. include an `--allow-resampling`
+        // flag and figure out how to resample the audio?
+
         assert!(
             channels.len() == 1,
-            "Tracks have different channel counts: {:?}",
+            "Multiple channel counts found in track list: {:?}",
             channels
+        );
+
+        assert!(
+            sample_rates.len() == 1,
+            "Multiple samples rates found in track list: {:?}",
+            sample_rates
         );
 
         AudioParams {

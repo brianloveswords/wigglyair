@@ -34,8 +34,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let tracks: TrackList = TrackList::from_files(cli.files);
     let params: AudioParams = tracks.audio_params();
 
-    tracing::info!("Audio params {:?}", params);
     tracing::info!("Playing {:?}", tracks);
+    tracing::info!("Audio params {:?}", params);
 
     let mut terminal = setup_terminal()?;
     let player = Player::new(tracks);
