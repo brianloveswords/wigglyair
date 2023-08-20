@@ -22,6 +22,7 @@ use itertools::FoldWhile::*;
 use itertools::Itertools;
 use metaflac::Tag;
 use ratatui::{prelude::*, widgets::*};
+use wigglyair::types::Volume;
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -32,19 +33,24 @@ struct Cli {
 
 fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
+    let volume = Arc::new(Volume::default());
+
     let tracks: TrackList = cli
         .files
         .iter()
         .map(|f| Path::new(f))
         .filter(|p| p.exists() && p.extension().unwrap_or_default() == "flac")
-        .map(|p| (p, Tag::read_from_path(p).unwrap()))
-        .map(|(p, tag)| {
+        .map(|p| {
+            let tag = Tag::read_from_path(p).unwrap();
             let path = p.to_owned();
-            let samples = tag
-                .get_streaminfo()
-                .map(|si| si.total_samples)
-                .unwrap_or_default();
-            Track { path, samples }
+            let si = tag.get_streaminfo().unwrap();
+            let samples = si.total_samples;
+            let channels = si.num_channels;
+            Track {
+                path,
+                samples,
+                channels,
+            }
         })
         .collect_vec()
         .into();
@@ -53,7 +59,12 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut terminal = setup_terminal()?;
     start_sample_ticker(Arc::clone(&current_sample), tracks.total_samples);
-    run(&mut terminal, tracks, Arc::clone(&current_sample))?;
+    run_tui(
+        &mut terminal,
+        tracks,
+        Arc::clone(&volume),
+        Arc::clone(&current_sample),
+    )?;
     restore_terminal(&mut terminal)?;
     Ok(())
 }
@@ -87,14 +98,14 @@ fn start_sample_ticker(current_sample: Arc<AtomicU64>, total_samples: u64) -> Jo
     })
 }
 
-fn run(
+fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     tracks: TrackList,
+    volume: Arc<Volume>,
     current_sample: Arc<AtomicU64>,
 ) -> Result<(), Box<dyn Error>> {
     let tracks = Rc::new(tracks);
     let total_samples = tracks.total_samples;
-    let mut volume = 100i16;
     Ok(loop {
         let current_sample = current_sample.load(Ordering::SeqCst);
         let ratio = current_sample as f64 / total_samples as f64;
@@ -115,7 +126,7 @@ fn run(
 
             let gauge = Gauge::default()
                 .gauge_style(Style::default().fg(Color::Magenta).bg(Color::Black))
-                .percent(volume as u16);
+                .percent(volume.get() as u16);
             f.render_widget(gauge, chunks[0]);
 
             let items = tracks
@@ -150,11 +161,11 @@ fn run(
                     KeyCode::Char('c') if is_holding_ctrl(key) => break,
                     KeyCode::Up => {
                         let n = volume_modifier(key);
-                        volume = if volume + n < 100 { volume + n } else { 100 }
+                        volume.up(n);
                     }
                     KeyCode::Down => {
                         let n = volume_modifier(key);
-                        volume = if volume - n > 0 { volume - n } else { 0 };
+                        volume.down(n);
                     }
                     _ => {}
                 }
@@ -163,7 +174,7 @@ fn run(
     })
 }
 
-fn volume_modifier(key: KeyEvent) -> i16 {
+fn volume_modifier(key: KeyEvent) -> u8 {
     if is_holding_shift(key) {
         10
     } else {
@@ -183,6 +194,7 @@ fn is_holding_ctrl(key: KeyEvent) -> bool {
 struct Track {
     path: PathBuf,
     samples: u64,
+    channels: u8,
 }
 
 struct TrackList {

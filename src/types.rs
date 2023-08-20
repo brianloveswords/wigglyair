@@ -49,6 +49,27 @@ impl Volume {
         }
     }
 
+    fn change(&self, value: i16) -> u8 {
+        let mut ret = 0u8;
+        self.0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |prev| {
+                let prev = prev as i16;
+                let new = (prev + value as i16).clamp(0, 100);
+                ret = new as u8;
+                Some(new as u8)
+            })
+            .unwrap();
+        ret
+    }
+
+    pub fn up(&self, value: u8) -> u8 {
+        self.change(value as i16)
+    }
+
+    pub fn down(&self, value: u8) -> u8 {
+        self.change(-(value as i16))
+    }
+
     pub fn set_from_string(&self, value: &str) -> Result<(), VolumeError> {
         let value: u8 = value
             .trim()
@@ -93,5 +114,27 @@ impl FromStr for Volume {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::try_from(value.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn test_volume_up_stays_below_100(amount: u8) {
+            let v = Volume::default();
+            let result = v.up(amount);
+            prop_assert!(result <= 100);
+        }
+
+        #[test]
+        fn test_volume_down_stays_below_100(amount: u8) {
+            let v = Volume::default();
+            let result = v.down(amount);
+            prop_assert!(result <= 100);
+        }
     }
 }
