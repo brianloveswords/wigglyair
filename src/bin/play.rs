@@ -1,4 +1,3 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -13,7 +12,7 @@ use symphonia::core::{audio::SampleBuffer, io::MediaSourceStream, probe::Hint};
 use tinyaudio::prelude::*;
 use tracing_unwrap::*;
 use wigglyair::configuration;
-use wigglyair::types::{AudioParams, Volume};
+use wigglyair::types::{AudioParams, PlayState, Volume};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -24,30 +23,6 @@ struct Cli {
     // volumne
     #[clap(short, long, default_value = "100")]
     volume: u8,
-}
-
-struct PlayState(AtomicBool);
-
-impl PlayState {
-    fn new() -> Self {
-        Self(AtomicBool::new(true))
-    }
-
-    fn toggle(&self) -> bool {
-        self.0
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(!v))
-            .unwrap_or_log()
-    }
-
-    fn is_paused(&self) -> bool {
-        !self.0.load(Ordering::SeqCst)
-    }
-}
-
-impl Default for PlayState {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 fn main() {
@@ -70,7 +45,7 @@ fn main() {
 
     let params = params_rx.recv().unwrap_or_log();
     tracing::info!(?params, "Setting up audio device");
-    let _device = run_output_device(params.into(), {
+    let _device = run_output_device(params.output_device_parameters(), {
         // buffer to store samples that are ready to be played. we'll resize it to
         // the have enough capacity to hold what we need without reallocating.
         let mut buf: Vec<f32> = Vec::new();

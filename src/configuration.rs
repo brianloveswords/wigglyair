@@ -43,7 +43,7 @@ pub fn setup_tracing_async(name: String) -> WorkerGuard {
         .lossy(false)
         .finish(file_appender);
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
-    let fmt_layer = BunyanFormattingLayer::new(name, std::io::stdout.and(non_blocking));
+    let fmt_layer = BunyanFormattingLayer::new(name, non_blocking);
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)
         .with(fmt_layer);

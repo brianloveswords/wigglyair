@@ -1,8 +1,21 @@
 use crate::configuration::Settings;
+use audio_thread_priority::promote_current_thread_to_real_time;
+use crossbeam::channel;
+use crossbeam::channel::Sender;
 use itertools::FoldWhile::*;
 use itertools::Itertools;
+use metaflac::Tag;
 use serde::Serialize;
+use std::collections::HashSet;
+use std::fs::File;
+use std::io;
+use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::thread;
+use std::thread::JoinHandle;
+use std::time::Duration;
 use std::{
     str::FromStr,
     sync::{
@@ -10,7 +23,13 @@ use std::{
         Arc,
     },
 };
+use symphonia::core::audio::SampleBuffer;
+use symphonia::core::errors::Error;
+use symphonia::core::io::MediaSourceStream;
+use symphonia::core::probe::Hint;
 use tinyaudio::OutputDeviceParameters;
+use tracing_unwrap::OptionExt;
+use tracing_unwrap::ResultExt;
 
 #[derive(Debug)]
 pub struct AppState {
@@ -145,14 +164,12 @@ impl AudioParams {
     pub fn channel_sample_count(&self) -> usize {
         self.sample_rate / 10
     }
-}
 
-impl From<AudioParams> for OutputDeviceParameters {
-    fn from(other: AudioParams) -> Self {
-        Self {
-            channels_count: other.channel_count,
-            sample_rate: other.sample_rate,
-            channel_sample_count: other.channel_sample_count(),
+    pub fn output_device_parameters(&self) -> OutputDeviceParameters {
+        OutputDeviceParameters {
+            channels_count: self.channel_count,
+            sample_rate: self.sample_rate,
+            channel_sample_count: self.channel_sample_count(),
         }
     }
 }
@@ -164,8 +181,24 @@ impl From<AudioParams> for OutputDeviceParameters {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Track {
     pub path: PathBuf,
+    pub sample_rate: u32,
     pub samples: u64,
     pub channels: u8,
+}
+impl Track {
+    fn from_path(path: &Path) -> Self {
+        let tag = Tag::read_from_path(path).unwrap();
+        let si = tag.get_streaminfo().unwrap();
+        let samples = si.total_samples;
+        let channels = si.num_channels;
+        let sample_rate = si.sample_rate;
+        Self {
+            path: path.to_owned(),
+            sample_rate,
+            samples,
+            channels,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -180,6 +213,16 @@ impl TrackList {
             tracks: Vec::new(),
             total_samples: 0,
         }
+    }
+
+    pub fn from_files(files: Vec<String>) -> Self {
+        files
+            .iter()
+            .map(Path::new)
+            .filter(is_flac)
+            .map(Track::from_path)
+            .collect_vec()
+            .into()
     }
 
     pub fn add_track(&mut self, track: Track) {
@@ -208,6 +251,35 @@ impl TrackList {
             .into_inner();
         &self.tracks[found]
     }
+
+    pub fn audio_params(&self) -> AudioParams {
+        let channels = self
+            .tracks
+            .iter()
+            .map(|t| t.channels)
+            .collect::<HashSet<_>>();
+
+        let sample_rates = self
+            .tracks
+            .iter()
+            .map(|t| t.sample_rate)
+            .collect::<HashSet<_>>();
+
+        assert!(
+            channels.len() == 1,
+            "Tracks have different channel counts: {:?}",
+            channels
+        );
+
+        AudioParams {
+            channel_count: *channels.iter().next().unwrap() as usize,
+            sample_rate: *sample_rates.iter().next().unwrap() as usize,
+        }
+    }
+}
+
+fn is_flac(p: &&Path) -> bool {
+    p.exists() && p.extension().unwrap_or_default() == "flac"
 }
 
 impl Default for TrackList {
@@ -221,6 +293,221 @@ impl Into<TrackList> for Vec<Track> {
         let mut tl = TrackList::new();
         tl.add_tracks(self);
         tl
+    }
+}
+
+//
+// Player
+//
+
+pub struct Player {
+    pub current_sample: Arc<AtomicU64>,
+    pub total_samples: Arc<AtomicU64>,
+    pub state: Arc<PlayState>,
+    pub volume: Arc<Volume>,
+    pub track_list: Arc<TrackList>,
+    pub current_track: Arc<Track>,
+    pub audio_params: Arc<AudioParams>,
+}
+
+impl Player {
+    pub fn new(track_list: TrackList) -> Self {
+        Self {
+            current_sample: Arc::new(AtomicU64::new(0)),
+            volume: Arc::new(Volume::default()),
+            state: Arc::new(PlayState::new()),
+            total_samples: Arc::new(AtomicU64::new(track_list.total_samples)),
+            current_track: Arc::new(track_list.tracks[0].clone()),
+            audio_params: Arc::new(track_list.audio_params()),
+            track_list: Arc::new(track_list),
+        }
+    }
+
+    pub fn start(&self) -> JoinHandle<()> {
+        let track_list = self.track_list.clone();
+        let params = self.audio_params.clone();
+        let current_sample = self.current_sample.clone();
+        let play_state = self.state.clone();
+        let volume = self.volume.clone();
+        let (samples_tx, samples_rx) = channel::bounded::<Vec<f32>>(100);
+        let paths = track_list
+            .tracks
+            .iter()
+            .map(|t| t.path.clone())
+            .collect_vec();
+
+        thread::spawn(move || {
+            // start the file reader
+            let reader_handle = start_file_reader(paths, samples_tx);
+
+            // start the audio player
+            tracing::info!(?params, "Setting up audio device");
+            let _device = tinyaudio::run_output_device(params.output_device_parameters(), {
+                // buffer to store samples that are ready to be played. we'll resize it to
+                // the have enough capacity to hold what we need without reallocating.
+                let mut buf: Vec<f32> = Vec::new();
+
+                let mut initialized = false;
+                move |data| {
+                    if !initialized {
+                        let tid = promote_current_thread_to_real_time(
+                            params.audio_buffer_frames(),
+                            params.sample_rate as u32,
+                        )
+                        .unwrap_or_log();
+                        tracing::info!(?tid, "Thread promoted");
+
+                        buf = Vec::with_capacity(data.len() * 2);
+                        initialized = true;
+                    }
+
+                    let size = data.len();
+
+                    // if we're paused, fill the buffer with zeros and get outta here
+                    // I tested just in case: using `fill` is about twice as fast as
+                    // using a static pile of zeroes and `copy_from_slice`.
+                    if play_state.is_paused() {
+                        data.fill(0.0);
+                        return;
+                    }
+
+                    let volume = volume.get();
+
+                    while buf.len() < size {
+                        let mut tmp = samples_rx
+                            .recv()
+                            .unwrap_or_log()
+                            .iter()
+                            .map(|s| s * (volume as f32 / 100.0))
+                            .collect();
+                        buf.append(&mut tmp);
+                    }
+
+                    data.copy_from_slice(&buf[..size]);
+                    buf.drain(..size);
+                    current_sample.fetch_add(size as u64, Ordering::SeqCst);
+                }
+            })
+            .unwrap_or_log();
+            reader_handle.join().unwrap_or_log();
+        })
+    }
+}
+
+fn start_file_reader(paths: Vec<PathBuf>, samples_tx: Sender<Vec<f32>>) -> JoinHandle<()> {
+    thread::spawn(move || {
+        for path in paths {
+            if path.extension().unwrap_or_default() != "flac" {
+                tracing::warn!(?path, "Skipping non-flac file");
+                continue;
+            }
+
+            tracing::info!(?path, "Reading audio file");
+
+            let probed = {
+                let file = Box::new(File::open(&path).unwrap_or_log());
+                symphonia::default::get_probe()
+                    .format(
+                        &Hint::new(),
+                        MediaSourceStream::new(file, Default::default()),
+                        &Default::default(),
+                        &Default::default(),
+                    )
+                    .unwrap_or_log()
+            };
+
+            let mut format = probed.format;
+            let track = format.default_track().unwrap_or_log();
+
+            let mut decoder = symphonia::default::get_codecs()
+                .make(&track.codec_params, &Default::default())
+                .unwrap_or_log();
+
+            let track_id = track.id;
+
+            let mut sample_buf = None;
+            loop {
+                let packet = match format.next_packet() {
+                    Ok(packet) => packet,
+                    Err(Error::IoError(e)) if e.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(err) => {
+                        tracing::error!(?err, ?path, "Error reading packet");
+                        break;
+                    }
+                };
+
+                if packet.track_id() != track_id {
+                    continue;
+                }
+
+                match decoder.decode(&packet) {
+                    Ok(audio_buf) => {
+                        if sample_buf.is_none() {
+                            let spec = *audio_buf.spec();
+                            let duration = audio_buf.capacity();
+                            tracing::info!(?spec, "Decoded audio buffer");
+                            sample_buf = Some(SampleBuffer::new(duration as u64, spec));
+                        }
+
+                        if let Some(buf) = &mut sample_buf {
+                            buf.copy_interleaved_ref(audio_buf);
+                            loop {
+                                match samples_tx.try_send(buf.samples().to_owned()) {
+                                    // if the buffer is full, wait for a bit. this lets us
+                                    // batch reads, which seems to be more efficient.
+                                    Err(err) if err.is_full() => {
+                                        thread::sleep(Duration::from_secs(4));
+                                    }
+                                    Ok(_) => {
+                                        tracing::trace!("Sent samples");
+                                        break;
+                                    }
+                                    Err(err) => {
+                                        tracing::error!(?err, "Error sending samples");
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(Error::DecodeError(err)) => {
+                        tracing::error!(err, "Audio loop: decode error")
+                    }
+                    Err(err) => {
+                        tracing::error!(%err, "Audio loop: error");
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+//
+// PlayState
+//
+
+pub struct PlayState(AtomicBool);
+
+impl PlayState {
+    pub fn new() -> Self {
+        Self(AtomicBool::new(true))
+    }
+
+    pub fn toggle(&self) -> bool {
+        self.0
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(!v))
+            .unwrap_or_log()
+    }
+
+    pub fn is_paused(&self) -> bool {
+        !self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for PlayState {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

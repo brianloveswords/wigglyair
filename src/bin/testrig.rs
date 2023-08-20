@@ -1,13 +1,7 @@
 use std::{
     error::Error,
     io::{self, Stdout},
-    path::Path,
-    rc::Rc,
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        Arc,
-    },
-    thread::{self, JoinHandle},
+    sync::atomic::Ordering,
     time::Duration,
 };
 
@@ -19,9 +13,11 @@ use crossterm::{
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use itertools::Itertools;
-use metaflac::Tag;
 use ratatui::{prelude::*, widgets::*};
-use wigglyair::types::{Track, TrackList, Volume};
+use wigglyair::{
+    configuration,
+    types::{AudioParams, Player, TrackList},
+};
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -31,39 +27,19 @@ struct Cli {
 }
 
 fn main() -> Result<(), Box<dyn Error>> {
+    let _guard = configuration::setup_tracing_async("testrig".into());
+
     let cli = Cli::parse();
-    let volume = Arc::new(Volume::default());
+    let tracks: TrackList = TrackList::from_files(cli.files);
+    let params: AudioParams = tracks.audio_params();
 
-    let tracks: TrackList = cli
-        .files
-        .iter()
-        .map(|f| Path::new(f))
-        .filter(|p| p.exists() && p.extension().unwrap_or_default() == "flac")
-        .map(|p| {
-            let tag = Tag::read_from_path(p).unwrap();
-            let path = p.to_owned();
-            let si = tag.get_streaminfo().unwrap();
-            let samples = si.total_samples;
-            let channels = si.num_channels;
-            Track {
-                path,
-                samples,
-                channels,
-            }
-        })
-        .collect_vec()
-        .into();
-
-    let current_sample = Arc::new(AtomicU64::new(0));
+    tracing::info!("Audio params {:?}", params);
+    tracing::info!("Playing {:?}", tracks);
 
     let mut terminal = setup_terminal()?;
-    start_sample_ticker(Arc::clone(&current_sample), tracks.total_samples);
-    run_tui(
-        &mut terminal,
-        tracks,
-        Arc::clone(&volume),
-        Arc::clone(&current_sample),
-    )?;
+    let player = Player::new(tracks);
+    player.start();
+    run_tui(&mut terminal, player)?;
     restore_terminal(&mut terminal)?;
     Ok(())
 }
@@ -83,32 +59,21 @@ fn restore_terminal(
     Ok(terminal.show_cursor()?)
 }
 
-fn start_sample_ticker(current_sample: Arc<AtomicU64>, total_samples: u64) -> JoinHandle<()> {
-    thread::spawn(move || {
-        current_sample.store(0, Ordering::SeqCst);
-        loop {
-            thread::sleep(Duration::from_millis(100));
-            let delta = 9600;
-            let previous = current_sample.fetch_add(delta, Ordering::SeqCst);
-            if previous + delta >= total_samples {
-                break;
-            }
-        }
-    })
-}
-
 fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
-    tracks: TrackList,
-    volume: Arc<Volume>,
-    current_sample: Arc<AtomicU64>,
+    player: Player,
 ) -> Result<(), Box<dyn Error>> {
-    let tracks = Rc::new(tracks);
+    player.start();
+
+    let tracks = player.track_list;
+    let current_sample = player.current_sample;
+    let volume = player.volume;
     let total_samples = tracks.total_samples;
+    let current_track = player.current_track;
+
     Ok(loop {
         let current_sample = current_sample.load(Ordering::SeqCst);
         let ratio = current_sample as f64 / total_samples as f64;
-        let current_track = tracks.find_playing(current_sample);
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -133,7 +98,7 @@ fn run_tui(
                 .iter()
                 .map(|t| {
                     let style = Style::default();
-                    let style = if t == current_track {
+                    let style = if t == current_track.as_ref() {
                         style.fg(Color::Green).bold()
                     } else {
                         style.fg(Color::White)
