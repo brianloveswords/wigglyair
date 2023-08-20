@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     io::{self, Stdout},
-    sync::atomic::Ordering,
+    sync::{atomic::Ordering, Arc},
     time::Duration,
 };
 
@@ -62,14 +62,14 @@ fn run_tui(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     player: Player,
 ) -> Result<(), Box<dyn Error>> {
-    player.start();
-
-    let tracks = player.track_list;
-    let current_sample = player.current_sample;
-    let volume = player.volume;
+    let tracks = Arc::clone(&player.track_list);
+    let current_sample = Arc::clone(&player.current_sample);
+    let volume = Arc::clone(&player.volume);
     let total_samples = tracks.total_samples;
-    let current_track = player.current_track;
-    let play_state = player.state;
+    let current_track = Arc::clone(&player.current_track);
+    let play_state = Arc::clone(&player.state);
+
+    player.start();
 
     Ok(loop {
         let current_sample = current_sample.load(Ordering::SeqCst);
@@ -102,12 +102,14 @@ fn run_tui(
             f.render_widget(gauge, chunks[0]);
 
             // track list
+            let current_track = current_track.load(Ordering::SeqCst);
             let items = tracks
                 .tracks
                 .iter()
-                .map(|t| {
+                .enumerate()
+                .map(|(i, t)| {
                     let style = Style::default();
-                    let style = if t == current_track.as_ref() {
+                    let style = if i == current_track {
                         style.fg(Color::Green).bold()
                     } else {
                         style.fg(Color::White)

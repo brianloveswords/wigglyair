@@ -14,6 +14,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -249,7 +250,9 @@ impl TrackList {
         self.tracks.extend(tracks);
     }
 
-    pub fn find_playing(&self, current_sample: u64) -> &Track {
+    // TODO: this is horribly inefficient for how much it's in the hot path
+    // we need to cache the start
+    pub fn find_playing(&self, current_sample: u64) -> usize {
         let (found, _) = self
             .tracks
             .iter()
@@ -263,7 +266,7 @@ impl TrackList {
                 }
             })
             .into_inner();
-        &self.tracks[found]
+        found
     }
 
     pub fn audio_params(&self) -> AudioParams {
@@ -320,7 +323,7 @@ pub struct Player {
     pub state: Arc<PlayState>,
     pub volume: Arc<Volume>,
     pub track_list: Arc<TrackList>,
-    pub current_track: Arc<Track>,
+    pub current_track: Arc<AtomicUsize>,
     pub audio_params: Arc<AudioParams>,
 }
 
@@ -331,17 +334,18 @@ impl Player {
             volume: Arc::new(Volume::default()),
             state: Arc::new(PlayState::new()),
             total_samples: Arc::new(AtomicU64::new(track_list.total_samples)),
-            current_track: Arc::new(track_list.tracks[0].clone()),
+            current_track: Arc::new(AtomicUsize::new(0)),
             audio_params: Arc::new(track_list.audio_params()),
             track_list: Arc::new(track_list),
         }
     }
 
-    pub fn start(&self) -> JoinHandle<()> {
+    pub fn start(self) -> JoinHandle<()> {
         let track_list = self.track_list.clone();
         let params = self.audio_params.clone();
         let current_sample = self.current_sample.clone();
         let channel_count = params.channel_count;
+        let current_track = self.current_track.clone();
         let play_state = self.state.clone();
         let volume = self.volume.clone();
         let (samples_tx, samples_rx) = channel::bounded::<Vec<f32>>(100);
@@ -351,6 +355,7 @@ impl Player {
             .map(|t| t.path.clone())
             .collect_vec();
 
+        let (done_tx, done_rx) = channel::bounded::<()>(0);
         thread::spawn(move || {
             let reader_handle = start_file_reader(paths, samples_tx);
 
@@ -359,8 +364,14 @@ impl Player {
             let mut buf: Vec<f32> = Vec::new();
 
             let mut initialized = false;
+            let mut is_done = false;
             tracing::info!(?params, "Setting up audio device");
             let _device = run_output_device(params.output_device_parameters(), move |data| {
+                if play_state.is_paused() || is_done {
+                    data.fill(0.0);
+                    return;
+                }
+
                 let size = data.len();
 
                 if !initialized {
@@ -375,19 +386,17 @@ impl Player {
                     initialized = true;
                 }
 
-                // if we're paused, fill the buffer with zeros and get outta here
-                // I tested just in case: using `fill` is about twice as fast as
-                // using a static pile of zeroes and `copy_from_slice`.
-                if play_state.is_paused() {
-                    data.fill(0.0);
-                    return;
-                }
-
                 let volume = volume.get();
 
                 while buf.len() < size {
                     match samples_rx.try_recv() {
                         Ok(samples) => {
+                            tracing::trace!(
+                                buf_len = buf.len(),
+                                size,
+                                samples_len = samples.len(),
+                                "Buffering samples"
+                            );
                             let mut tmp = samples
                                 .iter()
                                 .map(|s| s * (volume as f32 / 100.0))
@@ -395,21 +404,56 @@ impl Player {
                             buf.append(&mut tmp);
                         }
                         Err(TryRecvError::Empty) => {
+                            tracing::warn!("Samples channel empty");
                             break;
                         }
                         Err(TryRecvError::Disconnected) => {
-                            tracing::error!("Samples channel disconnected");
-                            return;
+                            tracing::info!("Samples channel disconnected");
+                            if let Err(error) = done_tx.send(()) {
+                                tracing::error!(?error, "Error sending done signal");
+                            }
+                            is_done = true;
+                            break;
                         }
                     }
                 }
 
-                data.copy_from_slice(&buf[..size]);
-                buf.drain(..size);
-                current_sample.fetch_add(size as u64 / channel_count as u64, Ordering::SeqCst);
+                // the last buffer is unlikely to be perfectly full. if we're on the
+                // last buffer we go through the extra work of making sure the slice
+                // is zero-padded to the right size. this involves extra allocations
+                // so it's worth the tax of checking this boolean every callback.
+                let max = size.min(buf.len());
+                let slice = &buf[..max];
+                if max == size {
+                    data.copy_from_slice(&slice);
+                } else {
+                    if !is_done {
+                        tracing::warn!(
+                            max,
+                            size,
+                            buf_len = buf.len(),
+                            "Buffer not full; padding with zeroes",
+                        );
+                    }
+                    let mut tmp = Vec::with_capacity(size);
+                    tmp.extend_from_slice(slice);
+                    tmp.resize(size, 0.0);
+                    data.copy_from_slice(&tmp);
+                }
+
+                buf.drain(..max);
+
+                let sample_count =
+                    current_sample.fetch_add(max as u64 / channel_count as u64, Ordering::SeqCst);
+
+                let track = track_list.find_playing(sample_count);
+                current_track.store(track, Ordering::SeqCst);
             })
             .unwrap_or_log();
+
             reader_handle.join().unwrap_or_log();
+            done_rx.recv().unwrap_or_log();
+            tracing::info!("Player finished");
         })
     }
 }
