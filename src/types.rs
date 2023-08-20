@@ -2,6 +2,7 @@ use crate::configuration::Settings;
 use audio_thread_priority::promote_current_thread_to_real_time;
 use crossbeam::channel;
 use crossbeam::channel::Sender;
+use crossbeam::channel::TryRecvError;
 use itertools::FoldWhile::*;
 use itertools::Itertools;
 use metaflac::Tag;
@@ -185,7 +186,15 @@ pub struct Track {
     pub sample_rate: u32,
     pub samples: u64,
     pub channels: u8,
+    pub max_block_size: u16,
+    pub min_block_size: u16,
 }
+
+//   4441164
+// - 4021920
+// ----------
+//    419244
+
 impl Track {
     fn from_path(path: &Path) -> Self {
         let tag = Tag::read_from_path(path).unwrap();
@@ -193,8 +202,12 @@ impl Track {
         let samples = si.total_samples;
         let channels = si.num_channels;
         let sample_rate = si.sample_rate;
+        let max_block_size = si.max_block_size;
+        let min_block_size = si.min_block_size;
         Self {
             path: path.to_owned(),
+            max_block_size,
+            min_block_size,
             sample_rate,
             samples,
             channels,
@@ -328,6 +341,7 @@ impl Player {
         let track_list = self.track_list.clone();
         let params = self.audio_params.clone();
         let current_sample = self.current_sample.clone();
+        let channel_count = params.channel_count;
         let play_state = self.state.clone();
         let volume = self.volume.clone();
         let (samples_tx, samples_rx) = channel::bounded::<Vec<f32>>(100);
@@ -347,6 +361,8 @@ impl Player {
             let mut initialized = false;
             tracing::info!(?params, "Setting up audio device");
             let _device = run_output_device(params.output_device_parameters(), move |data| {
+                let size = data.len();
+
                 if !initialized {
                     let tid = promote_current_thread_to_real_time(
                         params.audio_buffer_frames(),
@@ -355,11 +371,9 @@ impl Player {
                     .unwrap_or_log();
                     tracing::info!(?tid, "Thread promoted");
 
-                    buf = Vec::with_capacity(data.len() * 2);
+                    buf = Vec::with_capacity(size * 2);
                     initialized = true;
                 }
-
-                let size = data.len();
 
                 // if we're paused, fill the buffer with zeros and get outta here
                 // I tested just in case: using `fill` is about twice as fast as
@@ -372,18 +386,27 @@ impl Player {
                 let volume = volume.get();
 
                 while buf.len() < size {
-                    let mut tmp = samples_rx
-                        .recv()
-                        .unwrap_or_log()
-                        .iter()
-                        .map(|s| s * (volume as f32 / 100.0))
-                        .collect();
-                    buf.append(&mut tmp);
+                    match samples_rx.try_recv() {
+                        Ok(samples) => {
+                            let mut tmp = samples
+                                .iter()
+                                .map(|s| s * (volume as f32 / 100.0))
+                                .collect();
+                            buf.append(&mut tmp);
+                        }
+                        Err(TryRecvError::Empty) => {
+                            break;
+                        }
+                        Err(TryRecvError::Disconnected) => {
+                            tracing::error!("Samples channel disconnected");
+                            return;
+                        }
+                    }
                 }
 
                 data.copy_from_slice(&buf[..size]);
                 buf.drain(..size);
-                current_sample.fetch_add(size as u64, Ordering::SeqCst);
+                current_sample.fetch_add(size as u64 / channel_count as u64, Ordering::SeqCst);
             })
             .unwrap_or_log();
             reader_handle.join().unwrap_or_log();
@@ -392,6 +415,7 @@ impl Player {
 }
 
 fn start_file_reader(paths: Vec<PathBuf>, samples_tx: Sender<Vec<f32>>) -> JoinHandle<()> {
+    let mut total_samples = 0;
     thread::spawn(move || {
         for path in paths {
             if path.extension().unwrap_or_default() != "flac" {
@@ -448,11 +472,14 @@ fn start_file_reader(paths: Vec<PathBuf>, samples_tx: Sender<Vec<f32>>) -> JoinH
 
                         if let Some(buf) = &mut sample_buf {
                             buf.copy_interleaved_ref(audio_buf);
+                            let mut samples = buf.samples().to_owned();
+                            total_samples += samples.len() as u64;
                             loop {
-                                match samples_tx.try_send(buf.samples().to_owned()) {
+                                match samples_tx.try_send(samples) {
                                     // if the buffer is full, wait for a bit. this lets us
                                     // batch reads, which seems to be more efficient.
                                     Err(err) if err.is_full() => {
+                                        samples = err.into_inner();
                                         thread::sleep(Duration::from_secs(4));
                                     }
                                     Ok(_) => {
@@ -476,6 +503,7 @@ fn start_file_reader(paths: Vec<PathBuf>, samples_tx: Sender<Vec<f32>>) -> JoinH
                     }
                 }
             }
+            tracing::info!(total_samples, ?path, "Finished reading file");
         }
     })
 }

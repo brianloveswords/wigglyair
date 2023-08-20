@@ -38,11 +38,14 @@ tracing-unwrap = { version = "0.10.0", features = ["log-location"] }
 walkdir = "2.3.3"
 
 [profile.release]
-# debug = true
 strip = true
 codegen-units = 1
 lto = true
 panic = "abort"
+
+[profile.profiling]
+inherits = "release"
+debug = true
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["html_reports"] }
