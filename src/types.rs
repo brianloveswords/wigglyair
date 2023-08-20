@@ -187,14 +187,7 @@ pub struct Track {
     pub sample_rate: u32,
     pub samples: u64,
     pub channels: u8,
-    pub max_block_size: u16,
-    pub min_block_size: u16,
 }
-
-//   4441164
-// - 4021920
-// ----------
-//    419244
 
 impl Track {
     fn from_path(path: &Path) -> Self {
@@ -203,12 +196,8 @@ impl Track {
         let samples = si.total_samples;
         let channels = si.num_channels;
         let sample_rate = si.sample_rate;
-        let max_block_size = si.max_block_size;
-        let min_block_size = si.min_block_size;
         Self {
             path: path.to_owned(),
-            max_block_size,
-            min_block_size,
             sample_rate,
             samples,
             channels,
@@ -235,7 +224,7 @@ impl TrackList {
             .iter()
             .map(Path::new)
             .filter(is_flac)
-            .map(Track::from_path)
+            .map(|p| Track::from_path(p.canonicalize().unwrap().as_path()))
             .collect_vec()
             .into()
     }

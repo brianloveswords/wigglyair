@@ -14,6 +14,7 @@ use crossterm::{
 };
 use itertools::Itertools;
 use ratatui::{prelude::*, widgets::*};
+use tracing_unwrap::*;
 use wigglyair::{
     configuration,
     types::{AudioParams, Player, TrackList},
@@ -68,6 +69,8 @@ fn run_tui(
     let total_samples = tracks.total_samples;
     let current_track = Arc::clone(&player.current_track);
     let play_state = Arc::clone(&player.state);
+    let sample_rate = player.audio_params.sample_rate;
+    let mut last_track = usize::MAX; // absurd value to force initial inequality
 
     player.start();
 
@@ -76,6 +79,10 @@ fn run_tui(
         let ratio = (current_sample as f64 / total_samples as f64).clamp(0.0, 1.0);
         let is_paused = play_state.is_paused();
         terminal.draw(|f| {
+            //
+            // main layout chunks
+            //
+
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
                 .margin(1)
@@ -89,7 +96,10 @@ fn run_tui(
                 )
                 .split(f.size());
 
-            // volume
+            //
+            // volume bar
+            //
+
             let mut style = Style::default().bg(Color::Black).fg(Color::Magenta);
             if is_paused {
                 style = style.fg(Color::Red);
@@ -101,8 +111,21 @@ fn run_tui(
             }
             f.render_widget(gauge, chunks[0]);
 
-            // track list
+            //
+            // maintain state of current track
+            //
+
             let current_track = current_track.load(Ordering::SeqCst);
+            if current_track != last_track {
+                let track = &tracks.tracks[current_track];
+                tracing::info!(?track, "Playing next track");
+            }
+            last_track = current_track;
+
+            //
+            // track list UI
+            //
+
             let items = tracks
                 .tracks
                 .iter()
@@ -110,34 +133,54 @@ fn run_tui(
                 .map(|(i, t)| {
                     let style = Style::default();
                     let style = if i == current_track {
-                        style.fg(Color::Green).bold()
+                        let color = if is_paused { Color::Red } else { Color::Green };
+                        style.fg(color).bold()
                     } else {
                         style.fg(Color::White)
                     };
-                    ListItem::new(t.path.file_name().unwrap().to_string_lossy()).style(style)
+                    let label = t
+                        .path
+                        .file_name()
+                        .expect_or_log("No file name for track")
+                        .to_string_lossy();
+                    ListItem::new(label).style(style)
                 })
                 .collect_vec();
+
+            let color = if is_paused { Color::Red } else { Color::White };
             let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL))
+                .block(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(color)),
+                )
                 .style(Style::default().fg(Color::White));
             f.render_widget(list, chunks[1]);
 
-            // sample progress
+            //
+            // progress bar
+            //
+
+            let color = if is_paused { Color::Red } else { Color::Yellow };
             let gauge = Gauge::default()
-                .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black))
+                .gauge_style(Style::default().fg(color).bg(Color::Black))
                 .ratio(ratio)
-                .label(format!("{} / {}", current_sample, total_samples));
+                .label(format!(
+                    "{} / {}",
+                    samples_to_duration_string(sample_rate, current_sample),
+                    samples_to_duration_string(sample_rate, total_samples),
+                ));
             f.render_widget(gauge, chunks[2]);
         })?;
 
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
+                    KeyCode::Char('c') if is_holding_ctrl(key) => break,
                     KeyCode::Char('q') => break,
                     KeyCode::Char('p') => {
                         play_state.toggle();
                     }
-                    KeyCode::Char('c') if is_holding_ctrl(key) => break,
                     KeyCode::Up => {
                         let n = volume_modifier(key);
                         volume.up(n);
@@ -167,4 +210,21 @@ fn is_holding_shift(key: KeyEvent) -> bool {
 
 fn is_holding_ctrl(key: KeyEvent) -> bool {
     key.modifiers.contains(event::KeyModifiers::CONTROL)
+}
+
+fn samples_to_milliseconds(sample_rate: usize, samples: u64) -> Duration {
+    let seconds = samples as f64 / sample_rate as f64;
+    Duration::from_secs_f64(seconds)
+}
+
+fn duration_to_human_readable(duration: Duration) -> String {
+    let seconds = duration.as_secs();
+    let minutes = seconds / 60;
+    let seconds = seconds % 60;
+    format!("{:02}:{:02}", minutes, seconds)
+}
+
+fn samples_to_duration_string(sample_rate: usize, samples: u64) -> String {
+    let duration = samples_to_milliseconds(sample_rate, samples);
+    duration_to_human_readable(duration)
 }
