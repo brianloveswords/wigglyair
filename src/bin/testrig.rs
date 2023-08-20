@@ -38,7 +38,6 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut terminal = setup_terminal()?;
     let player = Player::new(tracks);
-    player.start();
     run_tui(&mut terminal, player)?;
     restore_terminal(&mut terminal)?;
     Ok(())
@@ -70,10 +69,12 @@ fn run_tui(
     let volume = player.volume;
     let total_samples = tracks.total_samples;
     let current_track = player.current_track;
+    let play_state = player.state;
 
     Ok(loop {
         let current_sample = current_sample.load(Ordering::SeqCst);
-        let ratio = current_sample as f64 / total_samples as f64;
+        let ratio = (current_sample as f64 / total_samples as f64).clamp(0.0, 1.0);
+        let is_paused = play_state.is_paused();
         terminal.draw(|f| {
             let chunks = Layout::default()
                 .direction(Direction::Vertical)
@@ -88,11 +89,19 @@ fn run_tui(
                 )
                 .split(f.size());
 
-            let gauge = Gauge::default()
-                .gauge_style(Style::default().fg(Color::Magenta).bg(Color::Black))
-                .percent(volume.get() as u16);
+            // volume
+            let mut style = Style::default().bg(Color::Black).fg(Color::Magenta);
+            if is_paused {
+                style = style.fg(Color::Red);
+            }
+            let value = volume.get() as u16;
+            let mut gauge = Gauge::default().gauge_style(style).percent(value);
+            if is_paused {
+                gauge = gauge.label("[paused]");
+            }
             f.render_widget(gauge, chunks[0]);
 
+            // track list
             let items = tracks
                 .tracks
                 .iter()
@@ -111,6 +120,7 @@ fn run_tui(
                 .style(Style::default().fg(Color::White));
             f.render_widget(list, chunks[1]);
 
+            // sample progress
             let gauge = Gauge::default()
                 .gauge_style(Style::default().fg(Color::Yellow).bg(Color::Black))
                 .ratio(ratio)
@@ -122,6 +132,9 @@ fn run_tui(
             if let Event::Key(key) = event::read()? {
                 match key.code {
                     KeyCode::Char('q') => break,
+                    KeyCode::Char('p') => {
+                        play_state.toggle();
+                    }
                     KeyCode::Char('c') if is_holding_ctrl(key) => break,
                     KeyCode::Up => {
                         let n = volume_modifier(key);
