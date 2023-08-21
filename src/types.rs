@@ -1,8 +1,6 @@
 use crate::configuration::Settings;
 use audio_thread_priority::promote_current_thread_to_real_time;
-use crossbeam::channel;
-use crossbeam::channel::Sender;
-use crossbeam::channel::TryRecvError;
+use crossbeam::channel::{self, Sender, TryRecvError};
 use itertools::FoldWhile::*;
 use itertools::Itertools;
 use metaflac::Tag;
@@ -10,29 +8,20 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io;
-use std::path::Path;
-use std::path::PathBuf;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::AtomicUsize;
-use std::thread;
-use std::thread::JoinHandle;
+use std::path::{Path, PathBuf};
+use std::str::FromStr;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use std::{
-    str::FromStr,
-    sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc,
-    },
-};
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::errors::Error;
 use symphonia::core::io::MediaSourceStream;
 use symphonia::core::probe::Hint;
 use tinyaudio::run_output_device;
 use tinyaudio::OutputDeviceParameters;
-use tracing_unwrap::OptionExt;
-use tracing_unwrap::ResultExt;
+use tracing_unwrap::*;
 
 #[derive(Debug)]
 pub struct AppState {
