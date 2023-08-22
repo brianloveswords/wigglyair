@@ -39,10 +39,10 @@ impl ServerSettings {
 }
 
 pub fn setup_tracing_async(name: String) -> WorkerGuard {
-    let logfile = Path::new("log");
-    let logdir = get_log_dir(&name);
+    let log_file = Path::new("log");
+    let log_dir = get_log_dir(&name);
 
-    let file_appender = tracing_appender::rolling::daily(logdir, logfile);
+    let file_appender = tracing_appender::rolling::daily(log_dir, log_file);
     let (non_blocking, guard) = NonBlockingBuilder::default()
         .lossy(false)
         .finish(file_appender);
