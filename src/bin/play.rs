@@ -76,8 +76,26 @@ fn run_tui(
 
     Ok(loop {
         let current_sample = current_sample.load(Ordering::SeqCst);
-        let ratio = (current_sample as f64 / total_samples as f64).clamp(0.0, 1.0);
+        let mut ratio = current_sample as f64 / total_samples as f64;
         let is_paused = play_state.is_paused();
+        let current_track = current_track.load(Ordering::SeqCst);
+        let track = &tracks.tracks[current_track];
+
+        if current_track != last_track {
+            tracing::info!(?track, "Playing next track");
+            last_track = current_track;
+        }
+
+        if ratio > 1.0 {
+            tracing::error!(
+                ratio,
+                current_track,
+                current_sample,
+                "current_sample / total_samples ratio > 1.0; clamping"
+            );
+            ratio = ratio.clamp(0.0, 1.0);
+        }
+
         terminal.draw(|f| {
             //
             // main layout chunks
@@ -110,17 +128,6 @@ fn run_tui(
                 gauge = gauge.label("[paused]");
             }
             f.render_widget(gauge, chunks[0]);
-
-            //
-            // maintain state of current track
-            //
-
-            let current_track = current_track.load(Ordering::SeqCst);
-            if current_track != last_track {
-                let track = &tracks.tracks[current_track];
-                tracing::info!(?track, "Playing next track");
-            }
-            last_track = current_track;
 
             //
             // track list UI
@@ -176,20 +183,37 @@ fn run_tui(
         if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 match key.code {
-                    KeyCode::Char('c') if is_holding_ctrl(key) => break,
-                    KeyCode::Char('q') => break,
+                    KeyCode::Char('c') if is_holding_ctrl(key) => {
+                        tracing::info!(reason = "keypress", "Quitting: `Ctrl-C` pressed");
+                        break;
+                    }
+                    KeyCode::Char('q') => {
+                        tracing::info!(reason = "keypress", "Quitting: `q` pressed");
+                        break;
+                    }
                     KeyCode::Char('p') => {
-                        play_state.toggle();
+                        let was_playing = play_state.toggle();
+                        if was_playing {
+                            tracing::info!(?track, "Pausing");
+                        } else {
+                            tracing::info!(?track, "Playing");
+                        }
                     }
                     KeyCode::Up => {
                         let n = volume_modifier(key);
-                        volume.up(n);
+                        let from = volume.up(n);
+                        let to = from + n;
+                        tracing::debug!(from, to, "Volume up");
                     }
                     KeyCode::Down => {
                         let n = volume_modifier(key);
-                        volume.down(n);
+                        let from = volume.down(n);
+                        let to = from - n;
+                        tracing::debug!(from, to, "Volume down");
                     }
-                    _ => {}
+                    other => {
+                        tracing::debug!(?other, "Unhandled key event");
+                    }
                 }
             }
         }

@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
-
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
@@ -55,10 +54,14 @@ impl Volume {
         Self(AtomicU8::new(initial))
     }
 
+    /// Get the current volume
     pub fn get(&self) -> u8 {
         self.0.load(Ordering::Acquire)
     }
 
+    /// Set the volume
+    ///
+    /// Returns an error if the value is greater than `Self::MAX`
     pub fn set(&self, value: u8) -> Result<(), VolumeError> {
         if value > Self::MAX {
             Err(VolumeError::InvalidValue(value))
@@ -81,10 +84,16 @@ impl Volume {
         ret
     }
 
+    /// Increase the volume by `value`
+    ///
+    /// Returns the *previous* volume
     pub fn up(&self, value: u8) -> u8 {
         self.change(value as i16)
     }
 
+    /// Decrease the volume by `value`
+    ///
+    /// Returns the *previous* volume
     pub fn down(&self, value: u8) -> u8 {
         self.change(-(value as i16))
     }
@@ -549,6 +558,9 @@ impl PlayState {
         Self(AtomicBool::new(true))
     }
 
+    /// Toggle the play state.
+    ///
+    /// Returns the *previous* state.
     pub fn toggle(&self) -> bool {
         self.0
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| Some(!v))
