@@ -17,12 +17,15 @@ use ratatui::{prelude::*, widgets::*};
 use tracing_unwrap::*;
 use wigglyair::{
     configuration,
-    types::{AudioParams, Player, TrackList},
+    types::{AudioParams, PlayState, Player, TrackList},
 };
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
+    #[clap(long, help = "Start paused", default_value_t = false)]
+    paused: bool,
+
     #[clap(help = "Files to play. Must be flac")]
     files: Vec<String>,
 }
@@ -33,12 +36,14 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     let tracks: TrackList = TrackList::from_files(cli.files);
     let params: AudioParams = tracks.audio_params();
+    let playing = !cli.paused;
 
     tracing::info!("Playing {:?}", tracks);
     tracing::info!("Audio params {:?}", params);
 
     let mut terminal = setup_terminal()?;
-    let player = Player::new(tracks);
+    let state = PlayState::with_state(playing);
+    let player = Player::with_state(tracks, state);
     run_tui(&mut terminal, player)?;
     restore_terminal(&mut terminal)?;
     Ok(())

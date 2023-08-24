@@ -324,10 +324,14 @@ pub struct Player {
 
 impl Player {
     pub fn new(track_list: TrackList) -> Self {
+        Self::with_state(track_list, PlayState::with_state(true))
+    }
+
+    pub fn with_state(track_list: TrackList, state: PlayState) -> Self {
         Self {
             current_sample: Arc::new(AtomicU64::new(0)),
             volume: Arc::new(Volume::default()),
-            state: Arc::new(PlayState::new()),
+            state: Arc::new(state),
             total_samples: Arc::new(AtomicU64::new(track_list.total_samples)),
             current_track: Arc::new(AtomicUsize::new(0)),
             audio_params: Arc::new(track_list.audio_params()),
@@ -551,11 +555,20 @@ fn start_file_reader(paths: Vec<PathBuf>, samples_tx: Sender<Vec<f32>>) -> JoinH
 // PlayState
 //
 
+/// Player state.
+///
+/// `true` represents playing
 pub struct PlayState(AtomicBool);
 
 impl PlayState {
+    /// Create a new `PlayState` in the playing state.
     pub fn new() -> Self {
-        Self(AtomicBool::new(true))
+        Self::with_state(true)
+    }
+
+    /// Create a new `PlayState` with the given state.
+    pub fn with_state(playing: bool) -> Self {
+        Self(AtomicBool::new(playing))
     }
 
     /// Toggle the play state.
@@ -567,6 +580,7 @@ impl PlayState {
             .unwrap_or_log()
     }
 
+    /// Whether the player is currently playing.
     pub fn is_paused(&self) -> bool {
         !self.0.load(Ordering::SeqCst)
     }

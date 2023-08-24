@@ -1,3 +1,9 @@
 #!/usr/bin/env bash
 
-cargo run --bin "${@}"
+function main() {
+    local bin="${1}"
+    shift
+    cargo run --bin "${bin}" -- "${@}"
+}
+
+main "${@}"
