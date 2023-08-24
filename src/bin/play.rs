@@ -138,8 +138,8 @@ fn run_tui(
             //
             // track list UI
             //
-            let items = track_list_to_list_items(&tracks, current_track, is_paused);
 
+            let items = track_list_to_list_items(&tracks, current_track, is_paused);
             let color = if is_paused { Color::Red } else { Color::White };
             let list = List::new(items)
                 .block(
@@ -211,17 +211,18 @@ fn track_list_to_list_items(
     current_track: usize,
     is_paused: bool,
 ) -> Vec<ListItem> {
-    let tracks = &tracks.tracks;
-    let mut items = Vec::with_capacity(tracks.len());
+    let list = &tracks.tracks;
+    let audio_params = &tracks.audio_params();
+    let mut items = Vec::with_capacity(list.len());
     let mut previous_album = ""; // safe initial value because album names are non-empty
-    for (i, t) in tracks.iter().enumerate() {
+    for (i, t) in list.iter().enumerate() {
         // print the album header when the album changes
         // if it's not the first album, toss a linebreak above as well
         if t.album != previous_album {
             if previous_album != "" {
                 items.push(ListItem::new(""));
             }
-            let style = Style::default().fg(Color::DarkGray).bold().underlined();
+            let style = Style::default().fg(Color::Yellow).bold().underlined();
             let label = t.display_album_header();
             let item = ListItem::new(label).style(style);
             items.push(item);
@@ -235,7 +236,20 @@ fn track_list_to_list_items(
         } else {
             style.fg(Color::White)
         };
-        let label = t.display_track();
+        let start_point_secs = duration_to_human_readable(samples_to_milliseconds(
+            audio_params.sample_rate,
+            tracks.get_start_point(i),
+        ));
+        let track_length = duration_to_human_readable(samples_to_milliseconds(
+            audio_params.sample_rate,
+            tracks.get_sample_count(i),
+        ));
+        let track = Span::from(t.display_track());
+        let timecode = Span::styled(
+            format!(" [{} @ {}]", track_length, start_point_secs,),
+            Style::default().fg(Color::DarkGray),
+        );
+        let label = Line::from(vec![track, timecode]);
         let item = ListItem::new(label).style(style);
         items.push(item);
     }

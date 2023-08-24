@@ -330,6 +330,23 @@ impl TrackList {
         found
     }
 
+    pub fn get_start_point(&self, index: usize) -> u64 {
+        self.tracks
+            .iter()
+            .take(index)
+            .map(|t| t.samples)
+            .sum::<u64>()
+    }
+
+    pub fn get_end_point(&self, index: usize) -> u64 {
+        self.get_start_point(index) + self.get_sample_count(index)
+    }
+
+    pub fn get_sample_count(&self, index: usize) -> u64 {
+        assert!(index < self.tracks.len(), "Index out of bounds");
+        self.tracks[index].samples
+    }
+
     pub fn audio_params(&self) -> AudioParams {
         let channels = self
             .tracks
