@@ -185,21 +185,78 @@ pub struct Track {
     pub sample_rate: u32,
     pub samples: u64,
     pub channels: u8,
+    pub album: String,
+    pub album_artist: String,
+    pub title: String,
+    pub track: u32,
 }
 
 impl Track {
-    fn from_path(path: &Path) -> Self {
-        let tag = Tag::read_from_path(path).unwrap();
+    fn from_path(path: PathBuf) -> Self {
+        let tag = Tag::read_from_path(&path).unwrap();
         let si = tag.get_streaminfo().unwrap();
         let samples = si.total_samples;
         let channels = si.num_channels;
         let sample_rate = si.sample_rate;
+
+        let comments = match tag.vorbis_comments() {
+            Some(c) => c,
+            None => {
+                tracing::error!(?path, "File missing vorbis comments");
+                panic!("Missing comments")
+            }
+        };
+
+        let title = match comments.title().and_then(|v| v.first()) {
+            Some(t) => t.to_owned(),
+            None => {
+                tracing::error!(?path, "File missing title metadata");
+                panic!("Missing title: {}", path.display())
+            }
+        };
+
+        let album = match comments.album().and_then(|v| v.first()) {
+            Some(a) => a.to_owned(),
+            None => {
+                tracing::error!(?path, "File missing album metadata");
+                panic!("Missing album: {}", path.display())
+            }
+        };
+
+        let album_artist = match comments.album_artist().and_then(|v| v.first()) {
+            Some(aa) => aa.to_owned(),
+            None => {
+                tracing::error!(?path, "File missing album artist");
+                panic!("Missing album artist: {}", path.display())
+            }
+        };
+
+        let track = match comments.track() {
+            Some(t) => t,
+            None => {
+                tracing::error!(?path, "File missing track");
+                panic!("Missing track")
+            }
+        };
+
         Self {
-            path: path.to_owned(),
+            path,
             sample_rate,
             samples,
             channels,
+            album,
+            album_artist,
+            title,
+            track,
         }
+    }
+
+    pub fn display_album_header(&self) -> String {
+        format!("{} – {}", self.album_artist, self.album)
+    }
+
+    pub fn display_track(&self) -> String {
+        format!("{:02} - {}", self.track, self.title)
     }
 }
 
@@ -209,20 +266,39 @@ pub struct TrackList {
     pub total_samples: u64,
 }
 
+// TODO: this needs work. In order to call something like `audio_params()` the track
+// list must not be empty. This is a problem because it's currently possible to construct
+// an empty track list in a few ways. We should probably make a smart constructor for this
+// that returns a Result and disallow empty track lists. In the meantime, I will rename
+// the constructors to include `unsafe_`.
 impl TrackList {
-    pub fn new() -> Self {
+    /// Create a new empty track list
+    ///
+    /// # Safety
+    ///
+    /// This method is unsafe because methods on this struct will panic if the track list
+    /// is empty, so the user of this function must ensure correct initialization before
+    /// use, or else the program will panic.
+    pub fn unsafe_new() -> Self {
         Self {
             tracks: Vec::new(),
             total_samples: 0,
         }
     }
 
-    pub fn from_files(files: Vec<String>) -> Self {
+    /// Create a new track list from a list of files
+    ///
+    /// # Safety
+    ///
+    /// This will filter out any files that are not FLAC files. This function is unsafe
+    /// because having an empty track list is not allowed, but this function does not check
+    /// for that.
+    pub fn unsafe_from_files(files: Vec<String>) -> Self {
         files
             .iter()
             .map(Path::new)
             .filter(is_flac)
-            .map(|p| Track::from_path(p.canonicalize().unwrap().as_path()))
+            .map(|p| Track::from_path(p.canonicalize().unwrap()))
             .collect_vec()
             .into()
     }
@@ -296,13 +372,13 @@ fn is_flac(p: &&Path) -> bool {
 
 impl Default for TrackList {
     fn default() -> Self {
-        Self::new()
+        Self::unsafe_new()
     }
 }
 
 impl Into<TrackList> for Vec<Track> {
     fn into(self) -> TrackList {
-        let mut tl = TrackList::new();
+        let mut tl = TrackList::unsafe_new();
         tl.add_tracks(self);
         tl
     }

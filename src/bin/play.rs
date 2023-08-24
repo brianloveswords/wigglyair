@@ -12,9 +12,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use itertools::Itertools;
 use ratatui::{prelude::*, widgets::*};
-use tracing_unwrap::*;
 use wigglyair::{
     configuration,
     types::{AudioParams, PlayState, Player, TrackList},
@@ -34,7 +32,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let _guard = configuration::setup_tracing_async("play".into());
 
     let cli = Cli::parse();
-    let tracks: TrackList = TrackList::from_files(cli.files);
+    let tracks: TrackList = TrackList::unsafe_from_files(cli.files);
     let params: AudioParams = tracks.audio_params();
     let playing = !cli.paused;
 
@@ -75,7 +73,10 @@ fn run_tui(
     let current_track = Arc::clone(&player.current_track);
     let play_state = Arc::clone(&player.state);
     let sample_rate = player.audio_params.sample_rate;
-    let mut last_track = usize::MAX; // absurd value to force initial inequality
+
+    // safe initial value: there are fewer than 18 quintillion
+    // tracks in the known world
+    let mut last_track = usize::MAX;
 
     player.start();
 
@@ -137,27 +138,7 @@ fn run_tui(
             //
             // track list UI
             //
-
-            let items = tracks
-                .tracks
-                .iter()
-                .enumerate()
-                .map(|(i, t)| {
-                    let style = Style::default();
-                    let style = if i == current_track {
-                        let color = if is_paused { Color::Red } else { Color::Green };
-                        style.fg(color).bold()
-                    } else {
-                        style.fg(Color::White)
-                    };
-                    let label = t
-                        .path
-                        .file_name()
-                        .expect_or_log("No file name for track")
-                        .to_string_lossy();
-                    ListItem::new(label).style(style)
-                })
-                .collect_vec();
+            let items = track_list_to_list_items(&tracks, current_track, is_paused);
 
             let color = if is_paused { Color::Red } else { Color::White };
             let list = List::new(items)
@@ -223,6 +204,42 @@ fn run_tui(
             }
         }
     })
+}
+
+fn track_list_to_list_items(
+    tracks: &TrackList,
+    current_track: usize,
+    is_paused: bool,
+) -> Vec<ListItem> {
+    let tracks = &tracks.tracks;
+    let mut items = Vec::with_capacity(tracks.len());
+    let mut previous_album = ""; // safe initial value because album names are non-empty
+    for (i, t) in tracks.iter().enumerate() {
+        // print the album header when the album changes
+        // if it's not the first album, toss a linebreak above as well
+        if t.album != previous_album {
+            if previous_album != "" {
+                items.push(ListItem::new(""));
+            }
+            let style = Style::default().fg(Color::DarkGray).bold().underlined();
+            let label = t.display_album_header();
+            let item = ListItem::new(label).style(style);
+            items.push(item);
+            previous_album = &t.album;
+        }
+
+        let style = Style::default();
+        let style = if i == current_track {
+            let color = if is_paused { Color::Red } else { Color::Green };
+            style.fg(color).bold()
+        } else {
+            style.fg(Color::White)
+        };
+        let label = t.display_track();
+        let item = ListItem::new(label).style(style);
+        items.push(item);
+    }
+    items
 }
 
 fn volume_modifier(key: KeyEvent) -> u8 {
