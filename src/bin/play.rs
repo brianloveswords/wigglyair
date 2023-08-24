@@ -15,7 +15,7 @@ use crossterm::{
 use ratatui::{prelude::*, widgets::*};
 use wigglyair::{
     configuration,
-    types::{AudioParams, PlayState, Player, TrackList},
+    types::{AudioParams, PlayState, Player, Track, TrackList},
 };
 
 #[derive(Parser)]
@@ -207,6 +207,14 @@ fn run_tui(
     })
 }
 
+pub fn display_album_header(track: &Track) -> String {
+    format!("{} – {}", track.album_artist, track.album)
+}
+
+pub fn display_track(track: &Track) -> String {
+    format!("{:02} {}", track.track, track.title)
+}
+
 fn track_list_to_rows(tracks: &TrackList, current_track: usize, is_paused: bool) -> Vec<Row> {
     let list = &tracks.tracks;
     let audio_params = &tracks.audio_params();
@@ -221,7 +229,7 @@ fn track_list_to_rows(tracks: &TrackList, current_track: usize, is_paused: bool)
                 rows.push(empty_row.clone());
             }
             let style = Style::default().fg(Color::Blue).italic();
-            let label = t.display_album_header();
+            let label = display_album_header(t);
             let row = Row::new(vec![
                 Cell::from(label).style(style),
                 Cell::from("").style(style),
@@ -230,13 +238,23 @@ fn track_list_to_rows(tracks: &TrackList, current_track: usize, is_paused: bool)
             previous_album = &t.album;
         }
 
-        let style = if i == current_track {
-            let color = if is_paused { Color::Red } else { Color::Green };
-            Style::default().fg(color).bold()
-        } else {
-            Style::default().fg(Color::White)
+        let track_span = {
+            let style = Style::default().fg(Color::DarkGray);
+            Span::styled(format!("{:02} ", t.track), style)
         };
-        let track = Cell::from(Span::styled(t.display_track(), style));
+
+        let title_span = {
+            let style = if i == current_track {
+                let color = if is_paused { Color::Red } else { Color::Green };
+                Style::default().fg(color).bold()
+            } else {
+                Style::default().fg(Color::White)
+            };
+            Span::styled(&t.title, style)
+        };
+
+        let line = Line::from(vec![track_span, title_span]);
+        let track = Cell::from(line);
 
         // time code
 

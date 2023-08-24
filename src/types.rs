@@ -250,14 +250,6 @@ impl Track {
             track,
         }
     }
-
-    pub fn display_album_header(&self) -> String {
-        format!("{} – {}", self.album_artist, self.album)
-    }
-
-    pub fn display_track(&self) -> String {
-        format!("{:02} - {}", self.track, self.title)
-    }
 }
 
 #[derive(Debug)]
