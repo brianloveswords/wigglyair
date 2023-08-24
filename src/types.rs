@@ -146,6 +146,44 @@ impl FromStr for Volume {
 }
 
 //
+// TimeCode
+//
+
+pub struct SkipSecs(AtomicU64);
+
+impl SkipSecs {
+    pub fn new(value: u64) -> Self {
+        Self(AtomicU64::new(value))
+    }
+
+    pub fn parse(value: String) -> Self {
+        // spit on `:` and treat the first part as minutes, the second part as seconds
+        let parts = value.split(':').collect_vec();
+
+        assert_eq!(parts.len(), 2);
+        let minutes = parts[0].parse::<u64>().unwrap_or_log();
+        let seconds = parts[1].parse::<u64>().unwrap_or_log();
+
+        Self::new(minutes * 60 + seconds)
+    }
+
+    pub fn drain_as_interleaved_samples(&self, sample_rate: u32) -> u64 {
+        let secs = self.0.swap(0, Ordering::SeqCst);
+        secs * sample_rate as u64
+    }
+
+    pub fn skip_forward(&self, value: u64) {
+        self.0.fetch_add(value, Ordering::SeqCst);
+    }
+}
+
+impl Default for SkipSecs {
+    fn default() -> Self {
+        Self::new(0)
+    }
+}
+
+//
 // Audio Params
 //
 
@@ -394,39 +432,72 @@ impl Into<TrackList> for Vec<Track> {
 }
 
 //
+// CurrentSample
+//
+
+pub struct CurrentSample(AtomicU64);
+
+impl CurrentSample {
+    fn new() -> Self {
+        Self(AtomicU64::new(0))
+    }
+
+    fn advance(&self, samples: u64) {
+        self.0.fetch_add(samples, Ordering::SeqCst);
+    }
+
+    fn get_and_advance(&self, samples: u64) -> u64 {
+        self.0.fetch_add(samples, Ordering::SeqCst)
+    }
+
+    pub fn get(&self) -> u64 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+impl Default for CurrentSample {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+//
 // Player
 //
 
 pub struct Player {
-    pub current_sample: Arc<AtomicU64>,
+    pub current_sample: Arc<CurrentSample>,
     pub total_samples: Arc<AtomicU64>,
     pub state: Arc<PlayState>,
     pub volume: Arc<Volume>,
     pub track_list: Arc<TrackList>,
     pub current_track: Arc<AtomicUsize>,
     pub audio_params: Arc<AudioParams>,
+    pub skip_secs: Arc<SkipSecs>,
 }
 
 impl Player {
     pub fn new(track_list: TrackList) -> Self {
-        Self::with_state(track_list, PlayState::with_state(true))
+        Self::with_state(track_list, PlayState::with_state(true), SkipSecs::default())
     }
 
-    pub fn with_state(track_list: TrackList, state: PlayState) -> Self {
+    pub fn with_state(track_list: TrackList, state: PlayState, skip_secs: SkipSecs) -> Self {
         Self {
-            current_sample: Arc::new(AtomicU64::new(0)),
+            current_sample: Arc::new(CurrentSample::default()),
             volume: Arc::new(Volume::default()),
             state: Arc::new(state),
             total_samples: Arc::new(AtomicU64::new(track_list.total_samples)),
             current_track: Arc::new(AtomicUsize::new(0)),
             audio_params: Arc::new(track_list.audio_params()),
             track_list: Arc::new(track_list),
+            skip_secs: Arc::new(skip_secs),
         }
     }
 
     pub fn start(self) -> JoinHandle<()> {
         let track_list = self.track_list.clone();
         let params = self.audio_params.clone();
+        let skip_secs = self.skip_secs.clone();
         let current_sample = self.current_sample.clone();
         let channel_count = params.channel_count;
         let current_track = self.current_track.clone();
@@ -441,7 +512,8 @@ impl Player {
 
         let (done_tx, done_rx) = channel::bounded::<()>(0);
         thread::spawn(move || {
-            let reader_handle = start_file_reader(paths, samples_tx);
+            let reader_handle =
+                start_file_reader(paths, samples_tx, skip_secs, current_sample.clone());
 
             // buffer to store samples that are ready to be played. we'll resize it to
             // the have enough capacity to hold what we need without reallocating.
@@ -528,22 +600,30 @@ impl Player {
                 buf.drain(..max);
 
                 let sample_count =
-                    current_sample.fetch_add(max as u64 / channel_count as u64, Ordering::SeqCst);
+                    current_sample.get_and_advance(max as u64 / channel_count as u64);
 
                 let track = track_list.find_playing(sample_count);
                 current_track.store(track, Ordering::SeqCst);
             })
             .unwrap_or_log();
 
-            reader_handle.join().unwrap_or_log();
+            reader_handle
+                .join()
+                .expect_or_log("Error joining reader thread");
             done_rx.recv().unwrap_or_log();
             tracing::info!("Player finished");
         })
     }
 }
 
-fn start_file_reader(paths: Vec<PathBuf>, samples_tx: Sender<Vec<f32>>) -> JoinHandle<()> {
+fn start_file_reader(
+    paths: Vec<PathBuf>,
+    samples_tx: Sender<Vec<f32>>,
+    skip_secs: Arc<SkipSecs>,
+    current_sample: Arc<CurrentSample>,
+) -> JoinHandle<()> {
     let mut total_samples = 0;
+    let mut skip_samples = 0u64;
     thread::spawn(move || {
         for path in paths {
             if path.extension().unwrap_or_default() != "flac" {
@@ -595,17 +675,37 @@ fn start_file_reader(paths: Vec<PathBuf>, samples_tx: Sender<Vec<f32>>) -> JoinH
                             let spec = *audio_buf.spec();
                             let duration = audio_buf.capacity();
                             tracing::info!(?spec, "Decoded audio buffer");
-                            sample_buf = Some(SampleBuffer::new(duration as u64, spec));
+                            sample_buf = Some((spec, SampleBuffer::new(duration as u64, spec)));
                         }
 
-                        if let Some(buf) = &mut sample_buf {
+                        if let Some((spec, buf)) = &mut sample_buf {
                             buf.copy_interleaved_ref(audio_buf);
                             let mut samples = buf.samples().to_owned();
-                            total_samples += samples.len() as u64;
+                            let duration = samples.len();
+                            total_samples += duration as u64;
+
+                            // if we have anything in the SkipSecs buffer, we need to
+                            // skip that many samples. if there's nothing left over, move
+                            // on with our lives, don't even enter the loop
+                            skip_samples += skip_secs.drain_as_interleaved_samples(spec.rate);
+
+                            if skip_samples > 0 {
+                                tracing::info!(skip_samples, duration, "Skipping samples");
+                                let remove = skip_samples.min(duration as u64);
+                                samples.drain(..remove as usize);
+
+                                current_sample.advance(remove);
+                                skip_samples -= remove;
+                            }
+
+                            if samples.is_empty() {
+                                continue;
+                            }
+
+                            // try to send the sample buffer. if the channel is full, wait for
+                            // a bit. this lets us batch reads, which seems to be more efficient.
                             loop {
                                 match samples_tx.try_send(samples) {
-                                    // if the buffer is full, wait for a bit. this lets us
-                                    // batch reads, which seems to be more efficient.
                                     Err(err) if err.is_full() => {
                                         samples = err.into_inner();
                                         thread::sleep(Duration::from_secs(4));

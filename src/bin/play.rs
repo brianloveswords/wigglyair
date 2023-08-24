@@ -15,7 +15,7 @@ use crossterm::{
 use ratatui::{prelude::*, widgets::*};
 use wigglyair::{
     configuration,
-    types::{AudioParams, PlayState, Player, Track, TrackList},
+    types::{AudioParams, PlayState, Player, SkipSecs, Track, TrackList},
 };
 
 #[derive(Parser)]
@@ -23,6 +23,9 @@ use wigglyair::{
 struct Cli {
     #[clap(long, help = "Start paused", default_value_t = false)]
     paused: bool,
+
+    #[clap(short, long, help = "Start at a specific time code")]
+    time: Option<String>,
 
     #[clap(help = "Files to play. Must be flac")]
     files: Vec<String>,
@@ -34,6 +37,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     let tracks: TrackList = TrackList::unsafe_from_files(cli.files);
     let params: AudioParams = tracks.audio_params();
+    let skip_secs = SkipSecs::parse(cli.time.unwrap_or("00:00".into()));
     let playing = !cli.paused;
 
     tracing::info!("Playing {:?}", tracks);
@@ -41,7 +45,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut terminal = setup_terminal()?;
     let state = PlayState::with_state(playing);
-    let player = Player::with_state(tracks, state);
+    let player = Player::with_state(tracks, state, skip_secs);
     run_tui(&mut terminal, player)?;
     restore_terminal(&mut terminal)?;
     Ok(())
@@ -81,7 +85,7 @@ fn run_tui(
     player.start();
 
     Ok(loop {
-        let current_sample = current_sample.load(Ordering::SeqCst);
+        let current_sample = current_sample.get();
         let mut ratio = current_sample as f64 / total_samples as f64;
         let is_paused = play_state.is_paused();
         let current_track = current_track.load(Ordering::SeqCst);
