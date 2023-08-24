@@ -139,16 +139,17 @@ fn run_tui(
             // track list UI
             //
 
-            let items = track_list_to_list_items(&tracks, current_track, is_paused);
+            let rows = track_list_to_rows(&tracks, current_track, is_paused);
             let color = if is_paused { Color::Red } else { Color::White };
-            let list = List::new(items)
+            let table = Table::new(rows)
                 .block(
                     Block::default()
                         .borders(Borders::ALL)
                         .border_style(Style::default().fg(color)),
                 )
-                .style(Style::default().fg(Color::White));
-            f.render_widget(list, chunks[1]);
+                .style(Style::default().fg(Color::White))
+                .widths(&[Constraint::Max(1000), Constraint::Min(16)]);
+            f.render_widget(table, chunks[1]);
 
             //
             // progress bar
@@ -206,36 +207,39 @@ fn run_tui(
     })
 }
 
-fn track_list_to_list_items(
-    tracks: &TrackList,
-    current_track: usize,
-    is_paused: bool,
-) -> Vec<ListItem> {
+fn track_list_to_rows(tracks: &TrackList, current_track: usize, is_paused: bool) -> Vec<Row> {
     let list = &tracks.tracks;
     let audio_params = &tracks.audio_params();
-    let mut items = Vec::with_capacity(list.len());
+    let mut rows = Vec::with_capacity(list.len());
     let mut previous_album = ""; // safe initial value because album names are non-empty
+    let empty_row = Row::new(vec![Cell::from(""), Cell::from("")]);
     for (i, t) in list.iter().enumerate() {
         // print the album header when the album changes
         // if it's not the first album, toss a linebreak above as well
         if t.album != previous_album {
             if previous_album != "" {
-                items.push(ListItem::new(""));
+                rows.push(empty_row.clone());
             }
-            let style = Style::default().fg(Color::Yellow).bold().underlined();
+            let style = Style::default().fg(Color::Blue).italic();
             let label = t.display_album_header();
-            let item = ListItem::new(label).style(style);
-            items.push(item);
+            let row = Row::new(vec![
+                Cell::from(label).style(style),
+                Cell::from("").style(style),
+            ]);
+            rows.push(row);
             previous_album = &t.album;
         }
 
-        let style = Style::default();
         let style = if i == current_track {
             let color = if is_paused { Color::Red } else { Color::Green };
-            style.fg(color).bold()
+            Style::default().fg(color).bold()
         } else {
-            style.fg(Color::White)
+            Style::default().fg(Color::White)
         };
+        let track = Cell::from(Span::styled(t.display_track(), style));
+
+        // time code
+
         let start_point_secs = duration_to_human_readable(samples_to_milliseconds(
             audio_params.sample_rate,
             tracks.get_start_point(i),
@@ -244,16 +248,20 @@ fn track_list_to_list_items(
             audio_params.sample_rate,
             tracks.get_sample_count(i),
         ));
-        let track = Span::from(t.display_track());
-        let timecode = Span::styled(
-            format!(" [{} @ {}]", track_length, start_point_secs,),
-            Style::default().fg(Color::DarkGray),
+        let style = if i == current_track {
+            let color = if is_paused { Color::Red } else { Color::Yellow };
+            Style::default().fg(color).bold()
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let timecode = Cell::from(
+            Line::styled(format!("[{} @ {}]", track_length, start_point_secs), style)
+                .alignment(Alignment::Right),
         );
-        let label = Line::from(vec![track, timecode]);
-        let item = ListItem::new(label).style(style);
-        items.push(item);
+        let row = Row::new(vec![track, timecode]);
+        rows.push(row);
     }
-    items
+    rows
 }
 
 fn volume_modifier(key: KeyEvent) -> u8 {
