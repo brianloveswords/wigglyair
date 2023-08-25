@@ -140,16 +140,10 @@ fn run_tui(
                         }
                     }
                     KeyCode::Up => {
-                        let n = volume_modifier(key);
-                        let from = volume.up(n);
-                        let to = from + n;
-                        tracing::debug!(from, to, "Volume up");
+                        volume.up(volume_modifier(key));
                     }
                     KeyCode::Down => {
-                        let n = volume_modifier(key);
-                        let from = volume.down(n);
-                        let to = from - n;
-                        tracing::debug!(from, to, "Volume down");
+                        volume.down(volume_modifier(key));
                     }
                     other => {
                         tracing::debug!(?other, "Unhandled key event");
