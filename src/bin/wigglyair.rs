@@ -131,7 +131,7 @@ fn run_tui(
                         tracing::info!(reason = "keypress", "Quitting: `q` pressed");
                         break;
                     }
-                    KeyCode::Char('p') => {
+                    KeyCode::Char('p') | KeyCode::Char(' ') => {
                         let was_playing = play_state.toggle();
                         if was_playing {
                             tracing::info!(?track, "Pausing");
@@ -181,7 +181,7 @@ fn build_progress_gauge<'a>(
 }
 
 fn build_track_list(tracks: &TrackList, current_track: usize, is_paused: bool) -> Table {
-    let rows = track_list_to_rows(tracks, current_track, is_paused);
+    let rows = build_rows(tracks, current_track, is_paused);
     let color = if is_paused { Color::Red } else { Color::White };
     let table = Table::new(rows)
         .block(
@@ -232,7 +232,7 @@ pub fn display_track(track: &Track) -> String {
     format!("{:02} {}", track.track, track.title)
 }
 
-fn track_list_to_rows(tracks: &TrackList, current_track: usize, is_paused: bool) -> Vec<Row> {
+fn build_rows(tracks: &TrackList, current_track: usize, is_paused: bool) -> Vec<Row> {
     let list = &tracks.tracks;
     let audio_params = &tracks.audio_params();
     let mut rows = Vec::with_capacity(list.len());
@@ -290,7 +290,7 @@ fn track_list_to_rows(tracks: &TrackList, current_track: usize, is_paused: bool)
             Style::default().fg(Color::DarkGray)
         };
         let timecode = Cell::from(
-            Line::styled(format!("[{track_length} @ {start_point_secs}]"), style)
+            Line::styled(format!("[{track_length} │ {start_point_secs}]"), style)
                 .alignment(Alignment::Right),
         );
         let row = Row::new(vec![track, timecode]);
