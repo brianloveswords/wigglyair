@@ -15,7 +15,7 @@ use crossterm::{
 use ratatui::{prelude::*, widgets::*};
 use wigglyair::{
     configuration,
-    types::{AudioParams, PlayState, Player, SkipSecs, Track, TrackList},
+    types::{AudioParams, PlayState, Player, Track, TrackList},
 };
 
 #[derive(Parser)]
@@ -37,7 +37,6 @@ fn main() -> Result<(), Box<dyn Error>> {
     let cli = Cli::parse();
     let tracks: TrackList = TrackList::unsafe_from_files(cli.files);
     let params: AudioParams = tracks.audio_params();
-    let skip_secs = SkipSecs::parse(cli.time.unwrap_or("00:00".into()));
     let playing = !cli.paused;
 
     tracing::info!("Playing {:?}", tracks);
@@ -45,7 +44,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let mut terminal = setup_terminal()?;
     let state = PlayState::with_state(playing);
-    let player = Player::with_state(tracks, state, skip_secs);
+    let player = Player::with_state(tracks, state);
     run_tui(&mut terminal, player)?;
     restore_terminal(&mut terminal)?;
     Ok(())
