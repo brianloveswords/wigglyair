@@ -1,4 +1,5 @@
 use crate::configuration::Settings;
+use crate::files;
 use audio_thread_priority::promote_current_thread_to_real_time;
 use crossbeam::channel::{self, Sender, TryRecvError};
 use itertools::FoldWhile::*;
@@ -8,7 +9,7 @@ use serde::Serialize;
 use std::collections::HashSet;
 use std::fs::File;
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -320,15 +321,13 @@ impl TrackList {
     ///
     /// # Safety
     ///
-    /// This will filter out any files that are not FLAC files. This function is unsafe
-    /// because having an empty track list is not allowed, but this function does not check
-    /// for that.
-    pub fn unsafe_from_files(files: Vec<String>) -> Self {
-        files
-            .iter()
-            .map(Path::new)
-            .filter(is_flac)
-            .map(|p| Track::from_path(p.canonicalize().unwrap()))
+    /// This function is unsafe because it may lead to a partially constructed
+    /// TrackList. If all files get filtered out because they are unsupported,
+    /// calls to some associated functions will panic.
+    pub fn unsafe_from_files(filenames: Vec<String>) -> Self {
+        files::only_audio_files(filenames)
+            .into_iter()
+            .map(Track::from_path)
             .collect_vec()
             .into()
     }
@@ -411,10 +410,6 @@ impl TrackList {
             sample_rate: *sample_rates.iter().next().unwrap() as usize,
         }
     }
-}
-
-fn is_flac(p: &&Path) -> bool {
-    p.exists() && p.extension().unwrap_or_default() == "flac"
 }
 
 impl Default for TrackList {
