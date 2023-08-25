@@ -389,6 +389,12 @@ impl TrackList {
                 .expect_or_log("No sample rate found"),
         }
     }
+
+    pub fn get_bounds(&self, i: usize) -> (u64, u64) {
+        let start = self.get_start_point(i);
+        let end = start + self.get_sample_count(i);
+        (start, end)
+    }
 }
 
 impl Default for TrackList {
