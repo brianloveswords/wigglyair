@@ -77,7 +77,7 @@ impl Volume {
         self.0
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |prev| {
                 let prev = prev as i16;
-                let new = (prev + value as i16).clamp(0, 100);
+                let new = (prev + value).clamp(0, 100);
                 ret = new as u8;
                 Some(new as u8)
             })
@@ -418,10 +418,10 @@ impl Default for TrackList {
     }
 }
 
-impl Into<TrackList> for Vec<Track> {
-    fn into(self) -> TrackList {
-        let mut tl = TrackList::unsafe_new();
-        tl.add_tracks(self);
+impl From<Vec<Track>> for TrackList {
+    fn from(v: Vec<Track>) -> Self {
+        let mut tl = Self::unsafe_new();
+        tl.add_tracks(v);
         tl
     }
 }
@@ -576,7 +576,7 @@ impl Player {
                 let max = size.min(buf.len());
                 let slice = &buf[..max];
                 if max == size {
-                    data.copy_from_slice(&slice);
+                    data.copy_from_slice(slice);
                 } else {
                     if !is_done {
                         tracing::warn!(

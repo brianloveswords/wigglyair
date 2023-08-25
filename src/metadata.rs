@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fs::Metadata;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use thiserror::Error;
 
 #[derive(Deserialize, Serialize, Debug, Clone)]
@@ -23,28 +23,6 @@ pub struct TrackMetadata {
     pub title: String,
     pub album_artist: String,
     pub track: u32,
-}
-
-impl TrackMetadata {
-    pub fn full_album(&self) -> String {
-        format!("{} - {}", self.album_artist, self.album)
-    }
-
-    pub fn padded_track(&self) -> String {
-        format!("{:02}", self.track)
-    }
-
-    pub fn debug_display(&self) -> String {
-        format!(
-            "[{}]\n{}/{}/{} {} - {}",
-            self.path.display().to_string(),
-            self.album_artist,
-            self.album,
-            self.padded_track(),
-            self.artist,
-            self.title,
-        )
-    }
 }
 
 #[derive(Error, Debug)]
@@ -83,27 +61,27 @@ pub enum TrackMetadataError {
 pub type FileMetadataMap = BTreeMap<String, TrackMetadata>;
 
 impl TrackMetadata {
-    pub async fn from_path(path: &PathBuf) -> Result<Self, TrackMetadataError> {
-        let stat = stat_file(path).await?;
+    pub async fn from_path(path: PathBuf) -> Result<Self, TrackMetadataError> {
+        let stat = stat_file(&path).await?;
         Self::from_path_with_stat(path, &stat).await
     }
 
     pub async fn from_path_with_stat(
-        path: &PathBuf,
+        path: PathBuf,
         stat: &std::fs::Metadata,
     ) -> Result<Self, TrackMetadataError> {
-        let last_modified = last_modified(&stat).map_err(|e| TrackMetadataError::IoFailed {
-            path: path.clone(),
+        let last_modified = last_modified(stat).map_err(|e| TrackMetadataError::IoFailed {
+            path: path.to_path_buf(),
             error: e,
         })?;
 
         let file_size: u64 = stat.len();
-        let tag = read_tag_from_path(path)?;
+        let tag = read_tag_from_path(&path)?;
         let streaminfo = tag
             .get_streaminfo()
             .ok_or(TrackMetadataError::InvalidStreamInfo { path: path.clone() })?;
 
-        let length_secs = calc_length_secs(&streaminfo);
+        let length_secs = calc_length_secs(streaminfo);
         let max_block_size = streaminfo.max_block_size;
         let total_samples = streaminfo.total_samples;
         let sample_rate = streaminfo.sample_rate;
@@ -155,8 +133,8 @@ impl TrackMetadata {
     }
 }
 
-fn read_tag_from_path(path: &PathBuf) -> Result<Tag, TrackMetadataError> {
-    Tag::read_from_path(&path).map_err(|e| TrackMetadataError::ReadFailed(e))
+fn read_tag_from_path(path: &Path) -> Result<Tag, TrackMetadataError> {
+    Tag::read_from_path(path).map_err(TrackMetadataError::ReadFailed)
 }
 
 fn calc_length_secs(si: &StreamInfo) -> u32 {
@@ -168,11 +146,11 @@ fn read_comments(tag: &Tag) -> Option<VorbisComment> {
     tag.vorbis_comments().cloned()
 }
 
-pub async fn stat_file(path: &PathBuf) -> Result<std::fs::Metadata, TrackMetadataError> {
+pub async fn stat_file(path: &Path) -> Result<std::fs::Metadata, TrackMetadataError> {
     tokio::fs::metadata(path)
         .await
         .map_err(|e| TrackMetadataError::IoFailed {
-            path: path.clone(),
+            path: path.to_path_buf(),
             error: e,
         })
 }

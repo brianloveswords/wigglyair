@@ -23,7 +23,7 @@ impl Database {
         };
 
         // see: https://cj.rs/blog/sqlite-pragma-cheatsheet-for-performance-and-consistency/
-        conn.pragma_update(None, "journal_mode", &"WAL")
+        conn.pragma_update(None, "journal_mode", "WAL")
             .expect("Failed to set journal mode");
 
         migrations
@@ -57,7 +57,7 @@ impl AsyncDatabase {
 
         conn.call(move |conn| {
             // see: https://cj.rs/blog/sqlite-pragma-cheatsheet-for-performance-and-consistency/
-            conn.pragma_update(None, "journal_mode", &"WAL")
+            conn.pragma_update(None, "journal_mode", "WAL")
         })
         .await
         .expect("Failed to set journal mode");
@@ -70,7 +70,7 @@ impl Drop for Database {
     #[tracing::instrument(skip(self))]
     fn drop(&mut self) {
         let conn = &self.conn;
-        conn.pragma_update(None, "analysis_limit", &400)
+        conn.pragma_update(None, "analysis_limit", 400)
             .expect("Failed to set analysis limit");
         conn.pragma_update(None, "optimize", "")
             .expect("Failed to optimize");

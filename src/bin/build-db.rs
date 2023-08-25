@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -163,7 +164,7 @@ async fn main() {
         let paths = WalkDir::new(&root)
             .into_iter()
             .filter_map(|e| e.ok())
-            .filter(|e| is_flac(e))
+            .filter(is_flac)
             .filter(path_filter)
             .map(|e| e.into_path())
             .take(cli.limit.unwrap_or(usize::MAX));
@@ -248,7 +249,7 @@ async fn analyze_file(
         return;
     }
 
-    let meta = match TrackMetadata::from_path_with_stat(&path, &stat).await {
+    let meta = match TrackMetadata::from_path_with_stat(path.to_path_buf(), &stat).await {
         Ok(meta) => meta,
         Err(err) => {
             tracing::error!(
@@ -262,13 +263,13 @@ async fn analyze_file(
     };
 
     tracing::debug!(id, ?meta, path = %path.display(), "Got metadata");
-    tx.send(WriterMessage::AddTrack(meta)).err().map(|err| {
-        tracing::error!(id, %err, path = %path.display(), "Failed to send metadata");
-    });
+    if let Some(error) = tx.send(WriterMessage::AddTrack(meta)).err() {
+        tracing::error!(id, %error, path = %path.display(), "Failed to send metadata");
+    }
 }
 
 fn check_path_is_up_to_date(
-    path: &PathBuf,
+    path: &Path,
     last_modified: &String,
     conn: &Connection,
 ) -> Result<bool, rusqlite::Error> {

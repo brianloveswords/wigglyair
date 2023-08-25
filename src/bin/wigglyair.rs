@@ -84,7 +84,7 @@ fn run_tui(
 
     player.start();
 
-    Ok(loop {
+    loop {
         let current_sample = current_sample.get();
         let mut ratio = current_sample as f64 / total_samples as f64;
         let is_paused = play_state.is_paused();
@@ -208,7 +208,8 @@ fn run_tui(
                 }
             }
         }
-    })
+    }
+    Ok(())
 }
 
 pub fn display_album_header(track: &Track) -> String {
@@ -229,7 +230,7 @@ fn track_list_to_rows(tracks: &TrackList, current_track: usize, is_paused: bool)
         // print the album header when the album changes
         // if it's not the first album, toss a linebreak above as well
         if t.album != previous_album {
-            if previous_album != "" {
+            if !previous_album.is_empty() {
                 rows.push(empty_row.clone());
             }
             let style = Style::default().fg(Color::Blue).italic();
