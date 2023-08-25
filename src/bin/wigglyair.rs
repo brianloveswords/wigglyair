@@ -86,10 +86,13 @@ fn run_tui(
 
     loop {
         let current_sample = current_sample.get();
+
+        #[allow(clippy::cast_precision_loss)]
         let mut ratio = current_sample as f64 / total_samples as f64;
+
         let is_paused = play_state.is_paused();
         let current_track = current_track.load(Ordering::SeqCst);
-        let track = &tracks.tracks[current_track];
+        let track = tracks.get_track(current_track);
 
         if current_track != last_track {
             tracing::info!(?track, "Playing next track");
@@ -107,68 +110,15 @@ fn run_tui(
         }
 
         terminal.draw(|f| {
-            //
-            // main layout chunks
-            //
+            let chunks = main_layout_chunks(f);
+            let volume = build_volume_gauge(is_paused, &volume);
+            let table = build_track_list(&tracks, current_track, is_paused);
+            let progress =
+                build_progress_gauge(is_paused, ratio, sample_rate, current_sample, total_samples);
 
-            let chunks = Layout::default()
-                .direction(Direction::Vertical)
-                .margin(1)
-                .constraints(
-                    [
-                        Constraint::Length(1),
-                        Constraint::Min(1),
-                        Constraint::Length(1),
-                    ]
-                    .as_ref(),
-                )
-                .split(f.size());
-
-            //
-            // volume bar
-            //
-
-            let mut style = Style::default().bg(Color::Black).fg(Color::Magenta);
-            if is_paused {
-                style = style.fg(Color::Red);
-            }
-            let value = volume.get() as u16;
-            let mut gauge = Gauge::default().gauge_style(style).percent(value);
-            if is_paused {
-                gauge = gauge.label("[paused]");
-            }
-            f.render_widget(gauge, chunks[0]);
-
-            //
-            // track list UI
-            //
-
-            let rows = track_list_to_rows(&tracks, current_track, is_paused);
-            let color = if is_paused { Color::Red } else { Color::White };
-            let table = Table::new(rows)
-                .block(
-                    Block::default()
-                        .borders(Borders::ALL)
-                        .border_style(Style::default().fg(color)),
-                )
-                .style(Style::default().fg(Color::White))
-                .widths(&[Constraint::Max(1000), Constraint::Min(16)]);
+            f.render_widget(volume, chunks[0]);
             f.render_widget(table, chunks[1]);
-
-            //
-            // progress bar
-            //
-
-            let color = if is_paused { Color::Red } else { Color::Yellow };
-            let gauge = Gauge::default()
-                .gauge_style(Style::default().fg(color).bg(Color::Black))
-                .ratio(ratio)
-                .label(format!(
-                    "{} / {}",
-                    samples_to_duration_string(sample_rate, current_sample),
-                    samples_to_duration_string(sample_rate, total_samples),
-                ));
-            f.render_widget(gauge, chunks[2]);
+            f.render_widget(progress, chunks[2]);
         })?;
 
         if event::poll(Duration::from_millis(200))? {
@@ -212,10 +162,73 @@ fn run_tui(
     Ok(())
 }
 
+fn build_progress_gauge<'a>(
+    is_paused: bool,
+    ratio: f64,
+    sample_rate: usize,
+    current_sample: u64,
+    total_samples: u64,
+) -> Gauge<'a> {
+    let color = if is_paused { Color::Red } else { Color::Yellow };
+    let gauge = Gauge::default()
+        .gauge_style(Style::default().fg(color).bg(Color::Black))
+        .ratio(ratio)
+        .label(format!(
+            "{} / {}",
+            samples_to_duration_string(sample_rate, current_sample),
+            samples_to_duration_string(sample_rate, total_samples),
+        ));
+    gauge
+}
+
+fn build_track_list(tracks: &TrackList, current_track: usize, is_paused: bool) -> Table {
+    let rows = track_list_to_rows(tracks, current_track, is_paused);
+    let color = if is_paused { Color::Red } else { Color::White };
+    let table = Table::new(rows)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(color)),
+        )
+        .style(Style::default().fg(Color::White))
+        .widths(&[Constraint::Max(1000), Constraint::Min(16)]);
+    table
+}
+
+fn build_volume_gauge(is_paused: bool, volume: &Arc<wigglyair::types::Volume>) -> Gauge {
+    let mut style = Style::default().bg(Color::Black).fg(Color::Magenta);
+    if is_paused {
+        style = style.fg(Color::Red);
+    }
+    let value = u16::from(volume.get());
+    let mut gauge = Gauge::default().gauge_style(style).percent(value);
+    if is_paused {
+        gauge = gauge.label("[paused]");
+    }
+    gauge
+}
+
+fn main_layout_chunks(f: &mut Frame<'_, CrosstermBackend<Stdout>>) -> std::rc::Rc<[Rect]> {
+    Layout::default()
+        .direction(Direction::Vertical)
+        .margin(1)
+        .constraints(
+            [
+                Constraint::Length(1),
+                Constraint::Min(1),
+                Constraint::Length(1),
+            ]
+            .as_ref(),
+        )
+        .split(f.size())
+}
+
+#[must_use]
 pub fn display_album_header(track: &Track) -> String {
     format!("{} – {}", track.album_artist, track.album)
 }
 
+#[must_use]
 pub fn display_track(track: &Track) -> String {
     format!("{:02} {}", track.track, track.title)
 }
@@ -278,7 +291,7 @@ fn track_list_to_rows(tracks: &TrackList, current_track: usize, is_paused: bool)
             Style::default().fg(Color::DarkGray)
         };
         let timecode = Cell::from(
-            Line::styled(format!("[{} @ {}]", track_length, start_point_secs), style)
+            Line::styled(format!("[{track_length} @ {start_point_secs}]"), style)
                 .alignment(Alignment::Right),
         );
         let row = Row::new(vec![track, timecode]);
@@ -303,6 +316,7 @@ fn is_holding_ctrl(key: KeyEvent) -> bool {
     key.modifiers.contains(event::KeyModifiers::CONTROL)
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn samples_to_milliseconds(sample_rate: usize, samples: u64) -> Duration {
     let seconds = samples as f64 / sample_rate as f64;
     Duration::from_secs_f64(seconds)
@@ -312,7 +326,7 @@ fn duration_to_human_readable(duration: Duration) -> String {
     let seconds = duration.as_secs();
     let minutes = seconds / 60;
     let seconds = seconds % 60;
-    format!("{:02}:{:02}", minutes, seconds)
+    format!("{minutes:02}:{seconds:02}")
 }
 
 fn samples_to_duration_string(sample_rate: usize, samples: u64) -> String {

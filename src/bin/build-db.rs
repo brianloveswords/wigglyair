@@ -79,7 +79,7 @@ async fn main() {
         let analyzer_rx = analyzer_rx.clone();
         let writer_tx = writer_tx.clone();
         task::spawn(async move {
-            use AnalyzerMessage::*;
+            use AnalyzerMessage::AnalyzeFile;
             tracing::info!(id, "Starting analyzer");
 
             loop {
@@ -163,16 +163,16 @@ async fn main() {
         let path_filter = path_filter_from_opt(cli.filter);
         let paths = WalkDir::new(&root)
             .into_iter()
-            .filter_map(|e| e.ok())
+            .filter_map(Result::ok)
             .filter(is_flac)
             .filter(path_filter)
-            .map(|e| e.into_path())
+            .map(DirEntry::into_path)
             .take(cli.limit.unwrap_or(usize::MAX));
 
         for path in paths {
             analyzer_tx
                 .send(AnalyzerMessage::AnalyzeFile(path))
-                .expect_or_log("Failed to send path for analysis")
+                .expect_or_log("Failed to send path for analysis");
         }
 
         tracing::info!(%root, "Finished walking");

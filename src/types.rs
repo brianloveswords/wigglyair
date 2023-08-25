@@ -367,6 +367,11 @@ impl TrackList {
             .sum::<u64>()
     }
 
+    /// Get the track by it's **0-based index** in the track list
+    pub fn get_track(&self, index: usize) -> &Track {
+        &self.tracks[index]
+    }
+
     pub fn get_end_point(&self, index: usize) -> u64 {
         self.get_start_point(index) + self.get_sample_count(index)
     }
@@ -718,7 +723,7 @@ fn start_file_reader(
                         }
                     }
                     Err(Error::DecodeError(err)) => {
-                        tracing::error!(err, "Audio loop: decode error")
+                        tracing::error!(err, "Audio loop: decode error");
                     }
                     Err(err) => {
                         tracing::error!(%err, "Audio loop: error");
@@ -741,11 +746,13 @@ fn start_file_reader(
 pub struct PlayState(AtomicBool);
 
 impl PlayState {
+    #[must_use]
     /// Create a new `PlayState` in the playing state.
     pub fn new() -> Self {
         Self::with_state(true)
     }
 
+    #[must_use]
     /// Create a new `PlayState` with the given state.
     pub fn with_state(playing: bool) -> Self {
         Self(AtomicBool::new(playing))
