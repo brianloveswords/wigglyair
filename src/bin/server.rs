@@ -6,7 +6,8 @@ use wigglyair::{configuration, routes, types::AppState};
 #[tokio::main]
 async fn main() {
     let _guard = configuration::setup_tracing_async("wigglyair".into());
-    let settings = configuration::get_configuration().expect("Failed to read configuration.");
+    let settings =
+        configuration::from_file("configuration.yml").expect("Failed to read configuration.");
     let addr = settings.server.addr();
 
     let state = AppState { settings };

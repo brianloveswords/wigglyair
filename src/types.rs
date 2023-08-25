@@ -2,7 +2,7 @@ use crate::configuration::Settings;
 use crate::files;
 use audio_thread_priority::promote_current_thread_to_real_time;
 use crossbeam::channel::{self, Sender, TryRecvError};
-use itertools::FoldWhile::*;
+use itertools::FoldWhile::{Continue, Done};
 use itertools::Itertools;
 use metaflac::Tag;
 use serde::Serialize;
@@ -16,8 +16,12 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 use symphonia::core::audio::SampleBuffer;
+use symphonia::core::codecs::DecoderOptions;
 use symphonia::core::errors::Error;
+use symphonia::core::formats::FormatOptions;
 use symphonia::core::io::MediaSourceStream;
+use symphonia::core::io::MediaSourceStreamOptions;
+use symphonia::core::meta::MetadataOptions;
 use symphonia::core::probe::Hint;
 use tinyaudio::run_output_device;
 use tinyaudio::OutputDeviceParameters;
@@ -62,6 +66,8 @@ impl Volume {
 
     /// Set the volume
     ///
+    /// # Errors
+    ///
     /// Returns an error if the value is greater than `Self::MAX`
     pub fn set(&self, value: u8) -> Result<(), VolumeError> {
         if value > Self::MAX {
@@ -76,10 +82,10 @@ impl Volume {
         let mut ret = 0u8;
         self.0
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |prev| {
-                let prev = prev as i16;
+                let prev = i16::from(prev);
                 let new = (prev + value).clamp(0, 100);
-                ret = new as u8;
-                Some(new as u8)
+                ret = u8::try_from(new).unwrap_or_log();
+                Some(u8::try_from(new).unwrap_or_log())
             })
             .unwrap();
         ret
@@ -89,16 +95,22 @@ impl Volume {
     ///
     /// Returns the *previous* volume
     pub fn up(&self, value: u8) -> u8 {
-        self.change(value as i16)
+        self.change(i16::from(value))
     }
 
     /// Decrease the volume by `value`
     ///
     /// Returns the *previous* volume
     pub fn down(&self, value: u8) -> u8 {
-        self.change(-(value as i16))
+        self.change(-i16::from(value))
     }
 
+    /// Set the volume from a string
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the string cannot be parsed as a u8 or
+    /// if the value is greater than `Self::MAX`
     pub fn set_from_string(&self, value: &str) -> Result<(), VolumeError> {
         let value: u8 = value
             .trim()
@@ -152,26 +164,27 @@ impl FromStr for Volume {
 
 #[derive(Debug, Clone, Copy)]
 pub struct AudioParams {
-    pub channel_count: usize,
-    pub sample_rate: usize,
+    pub channel_count: u8,
+    pub sample_rate: u32,
 }
 
 impl AudioParams {
     const DEFAULT_AUDIO_BUFFER_FRAMES: u32 = 0;
 
-    pub fn audio_buffer_frames(&self) -> u32 {
+    pub fn audio_buffer_frames(self) -> u32 {
         Self::DEFAULT_AUDIO_BUFFER_FRAMES
     }
 
-    pub fn channel_sample_count(&self) -> usize {
+    fn channel_sample_count(self) -> u32 {
         self.sample_rate / 10
     }
 
-    pub fn output_device_parameters(&self) -> OutputDeviceParameters {
+    pub fn output_device_parameters(self) -> OutputDeviceParameters {
         OutputDeviceParameters {
-            channels_count: self.channel_count,
-            sample_rate: self.sample_rate,
-            channel_sample_count: self.channel_sample_count(),
+            channels_count: usize::from(self.channel_count),
+            sample_rate: usize::try_from(self.sample_rate).expect_or_log("Invalid sample rate"),
+            channel_sample_count: usize::try_from(self.channel_sample_count())
+                .expect_or_log("Invalid channel sample count"),
         }
     }
 }
@@ -200,45 +213,39 @@ impl Track {
         let channels = si.num_channels;
         let sample_rate = si.sample_rate;
 
-        let comments = match tag.vorbis_comments() {
-            Some(c) => c,
-            None => {
-                tracing::error!(?path, "File missing vorbis comments");
-                panic!("Missing comments")
-            }
-        };
+        let comments = tag.vorbis_comments().unwrap_or_else(|| {
+            tracing::error!(?path, "File missing vorbis comments");
+            panic!("Missing comments: {}", path.display())
+        });
 
-        let title = match comments.title().and_then(|v| v.first()) {
-            Some(t) => t.to_owned(),
-            None => {
+        let title = comments
+            .title()
+            .and_then(|v| v.first().cloned())
+            .unwrap_or_else(|| {
                 tracing::error!(?path, "File missing title metadata");
                 panic!("Missing title: {}", path.display())
-            }
-        };
+            });
 
-        let album = match comments.album().and_then(|v| v.first()) {
-            Some(a) => a.to_owned(),
-            None => {
+        let album = comments
+            .album()
+            .and_then(|v| v.first().cloned())
+            .unwrap_or_else(|| {
                 tracing::error!(?path, "File missing album metadata");
                 panic!("Missing album: {}", path.display())
-            }
-        };
+            });
 
-        let album_artist = match comments.album_artist().and_then(|v| v.first()) {
-            Some(aa) => aa.to_owned(),
-            None => {
-                tracing::error!(?path, "File missing album artist");
-                panic!("Missing album artist: {}", path.display())
-            }
-        };
+        let album_artist = comments
+            .album_artist()
+            .and_then(|v| v.first().cloned())
+            .unwrap_or_else(|| {
+                tracing::error!(?path, "File missing album_artist metadata");
+                panic!("Missing album_artist: {}", path.display())
+            });
 
-        let track = match comments.track() {
-            Some(t) => t,
-            None => {
-                tracing::error!(?path, "File missing track");
-                panic!("Missing track")
-            }
-        };
+        let track = comments.track().unwrap_or_else(|| {
+            tracing::error!(?path, "File missing track");
+            panic!("Missing track")
+        });
 
         Self {
             path,
@@ -284,10 +291,10 @@ impl TrackList {
     /// # Safety
     ///
     /// This function is unsafe because it may lead to a partially constructed
-    /// TrackList. If all files get filtered out because they are unsupported,
+    /// `TrackList`. If all files get filtered out because they are unsupported,
     /// calls to some associated functions will panic.
-    pub fn unsafe_from_files(filenames: Vec<String>) -> Self {
-        files::only_audio_files(filenames)
+    pub fn unsafe_from_files(filenames: &[String]) -> Self {
+        files::only_audio(filenames)
             .into_iter()
             .map(Track::from_path)
             .collect_vec()
@@ -330,7 +337,12 @@ impl TrackList {
     }
 
     /// Get the track by it's **0-based index** in the track list
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the index is out of bounds
     pub fn get_track(&self, index: usize) -> &Track {
+        assert!(index < self.tracks.len(), "Index out of bounds");
         &self.tracks[index]
     }
 
@@ -338,23 +350,22 @@ impl TrackList {
         self.get_start_point(index) + self.get_sample_count(index)
     }
 
+    /// Get the number of samples in the track at the given index
     pub fn get_sample_count(&self, index: usize) -> u64 {
-        assert!(index < self.tracks.len(), "Index out of bounds");
-        self.tracks[index].samples
+        self.get_track(index).samples
     }
 
+    /// Get the audio params for this track list
+    ///
+    /// # Panics
+    ///
+    /// This function will panic if the track list is empty, or if there are
+    /// tracks with different sample rates.
+    #[must_use]
     pub fn audio_params(&self) -> AudioParams {
-        let channels = self
-            .tracks
-            .iter()
-            .map(|t| t.channels)
-            .collect::<HashSet<_>>();
-
-        let sample_rates = self
-            .tracks
-            .iter()
-            .map(|t| t.sample_rate)
-            .collect::<HashSet<_>>();
+        let tracks = &self.tracks;
+        let channels = tracks.iter().map(|t| t.channels).collect::<HashSet<_>>();
+        let sample_rates = tracks.iter().map(|t| t.sample_rate).collect::<HashSet<_>>();
 
         // TODO: don't panic, warn the user of the problem and give them
         // a suggestion on how to fix it. include an `--allow-resampling`
@@ -362,19 +373,20 @@ impl TrackList {
 
         assert!(
             channels.len() == 1,
-            "Multiple channel counts found in track list: {:?}",
-            channels
+            "Multiple channel counts found in track list: {tracks:?}"
         );
 
         assert!(
             sample_rates.len() == 1,
-            "Multiple samples rates found in track list: {:?}",
-            sample_rates
+            "Multiple samples rates found in track list: {tracks:?}"
         );
 
         AudioParams {
-            channel_count: *channels.iter().next().unwrap() as usize,
-            sample_rate: *sample_rates.iter().next().unwrap() as usize,
+            channel_count: *channels.iter().next().expect_or_log("No channels found"),
+            sample_rate: *sample_rates
+                .iter()
+                .next()
+                .expect_or_log("No sample rate found"),
         }
     }
 }
@@ -487,7 +499,7 @@ impl Player {
                 if !initialized {
                     let tid = promote_current_thread_to_real_time(
                         params.audio_buffer_frames(),
-                        params.sample_rate as u32,
+                        params.sample_rate,
                     )
                     .unwrap_or_log();
                     tracing::info!(?tid, "Thread promoted");
@@ -509,7 +521,7 @@ impl Player {
                             );
                             let mut tmp = samples
                                 .iter()
-                                .map(|s| s * (volume as f32 / 100.0))
+                                .map(|s| s * (f32::from(volume) / 100.0))
                                 .collect();
                             buf.append(&mut tmp);
                         }
@@ -554,7 +566,7 @@ impl Player {
                 buf.drain(..max);
 
                 let sample_count =
-                    current_sample.get_and_advance(max as u64 / channel_count as u64);
+                    current_sample.get_and_advance(max as u64 / u64::from(channel_count));
 
                 let track = track_list.find_playing(sample_count);
                 current_track.store(track, Ordering::SeqCst);
@@ -586,9 +598,9 @@ fn start_file_reader(paths: Vec<PathBuf>, samples_tx: Sender<Vec<f32>>) -> JoinH
                 symphonia::default::get_probe()
                     .format(
                         &Hint::new(),
-                        MediaSourceStream::new(file, Default::default()),
-                        &Default::default(),
-                        &Default::default(),
+                        MediaSourceStream::new(file, MediaSourceStreamOptions::default()),
+                        &FormatOptions::default(),
+                        &MetadataOptions::default(),
                     )
                     .unwrap_or_log()
             };
@@ -597,7 +609,7 @@ fn start_file_reader(paths: Vec<PathBuf>, samples_tx: Sender<Vec<f32>>) -> JoinH
             let track = format.default_track().unwrap_or_log();
 
             let mut decoder = symphonia::default::get_codecs()
-                .make(&track.codec_params, &Default::default())
+                .make(&track.codec_params, &DecoderOptions::default())
                 .unwrap_or_log();
 
             let track_id = track.id;

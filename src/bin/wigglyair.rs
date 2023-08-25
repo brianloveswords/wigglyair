@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn Error>> {
     let _guard = configuration::setup_tracing_async("wigglyair".into());
 
     let cli = Cli::parse();
-    let tracks: TrackList = TrackList::unsafe_from_files(cli.files);
+    let tracks: TrackList = TrackList::unsafe_from_files(&cli.files);
     let params: AudioParams = tracks.audio_params();
     let playing = !cli.paused;
 
@@ -164,7 +164,7 @@ fn run_tui(
 fn build_progress_gauge<'a>(
     is_paused: bool,
     ratio: f64,
-    sample_rate: usize,
+    sample_rate: u32,
     current_sample: u64,
     total_samples: u64,
 ) -> Gauge<'a> {
@@ -315,9 +315,11 @@ fn is_holding_ctrl(key: KeyEvent) -> bool {
     key.modifiers.contains(event::KeyModifiers::CONTROL)
 }
 
-#[allow(clippy::cast_precision_loss)]
-fn samples_to_milliseconds(sample_rate: usize, samples: u64) -> Duration {
-    let seconds = samples as f64 / sample_rate as f64;
+fn samples_to_milliseconds(sample_rate: u32, samples: u64) -> Duration {
+    #[allow(clippy::cast_precision_loss)]
+    let samples = samples as f64;
+
+    let seconds = samples / f64::from(sample_rate);
     Duration::from_secs_f64(seconds)
 }
 
@@ -328,7 +330,7 @@ fn duration_to_human_readable(duration: Duration) -> String {
     format!("{minutes:02}:{seconds:02}")
 }
 
-fn samples_to_duration_string(sample_rate: usize, samples: u64) -> String {
+fn samples_to_duration_string(sample_rate: u32, samples: u64) -> String {
     let duration = samples_to_milliseconds(sample_rate, samples);
     duration_to_human_readable(duration)
 }

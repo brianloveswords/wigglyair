@@ -15,8 +15,8 @@ use walkdir::DirEntry;
 use walkdir::WalkDir;
 use wigglyair::{
     self, configuration,
-    database::{AsyncDatabase, DatabaseKind},
-    metadata::{self, TrackMetadata},
+    database::{Database, Kind},
+    metadata::{self, Track},
 };
 
 #[derive(Parser, Debug)]
@@ -42,7 +42,7 @@ enum AnalyzerMessage {
 
 #[derive(Debug)]
 enum WriterMessage {
-    AddTrack(TrackMetadata),
+    AddTrack(Track),
 }
 
 #[tokio::main]
@@ -55,7 +55,7 @@ async fn main() {
 
     // set up the async database connection
     let db = {
-        let db = AsyncDatabase::connect(DatabaseKind::parse(&db_path)).await;
+        let db = Database::connect(Kind::parse(&db_path)).await;
         db.conn
             .call(|conn| {
                 Migrations::new(vec![M::up(include_str!(
@@ -249,7 +249,7 @@ async fn analyze_file(
         return;
     }
 
-    let meta = match TrackMetadata::from_path_with_stat(path.to_path_buf(), &stat).await {
+    let meta = match Track::from_path_with_stat(&path, &stat) {
         Ok(meta) => meta,
         Err(err) => {
             tracing::error!(

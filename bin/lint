@@ -1,3 +1,8 @@
 #!/usr/bin/env bash
 
-cargo clippy -- -Wclippy::pedantic -Aclippy::wildcard-imports -Aclippy::too-many-lines
+cargo clippy -- \
+    -Wclippy::pedantic \
+    -Wclippy::doc-markdown \
+    -Aclippy::wildcard-imports \
+    -Aclippy::too-many-lines \
+    -Aclippy::must-use-candidate \

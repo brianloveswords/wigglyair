@@ -33,11 +33,28 @@ impl ServerSettings {
         format!("{}:{}", self.host, self.port)
     }
 
+    /// Get the address as a `SocketAddr`
+    ///
+    /// # Panics
+    ///
+    /// Panics if the address cannot be parsed
     pub fn addr(&self) -> SocketAddr {
         self.addr_string().parse().expect("Failed to parse address")
     }
 }
 
+/// Setup tracing
+///
+/// This will setup tracing to log to a file in the log directory
+/// based on the name of the application.
+///
+/// # Panics
+///
+/// Panics if the subscriber could not be set
+///
+/// # See Also
+///
+/// - [`get_log_dir`]
 pub fn setup_tracing_async(name: String) -> WorkerGuard {
     let log_file = Path::new("log");
     let log_dir = get_log_dir(&name);
@@ -56,28 +73,36 @@ pub fn setup_tracing_async(name: String) -> WorkerGuard {
     guard
 }
 
+/// Get the log directory for the application
+///
+/// # Panics
+///
+/// Panics if the project directories cannot be retrieved
 pub fn get_log_dir(name: &str) -> PathBuf {
-    let project_dirs = ProjectDirs::from("com", "wigglyair", name).unwrap_or_log();
+    let project_dirs =
+        ProjectDirs::from("com", "wigglyair", name).expect_or_log("Failed to get project dirs");
 
     // state_dir only exists on Linux, so we'll fall back to `{cache_dir}/logs`.
     // went back and forth on whether this belongs in data or cache, but since
     // logs are not required for the app to function, cache feels right.
-    project_dirs
-        .state_dir()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| {
+    project_dirs.state_dir().map_or_else(
+        || {
             let mut cache_dir = project_dirs.cache_dir().to_path_buf();
             cache_dir.push("logs");
             cache_dir
-        })
+        },
+        Path::to_path_buf,
+    )
 }
 
-pub fn get_configuration() -> Result<Settings, ConfigError> {
+/// Read a configuration file and deserialize it into a Settings struct.
+///
+/// # Errors
+///
+/// Returns a `ConfigError` if the file cannot be read or deserialized.
+pub fn from_file(file: &str) -> Result<Settings, ConfigError> {
     let settings = Config::builder()
-        .add_source(config::File::new(
-            "configuration.yml",
-            config::FileFormat::Yaml,
-        ))
+        .add_source(config::File::new(file, config::FileFormat::Yaml))
         .build()?;
     settings.try_deserialize::<Settings>()
 }

@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use itertools::Itertools;
+use tracing_unwrap::ResultExt;
 use walkdir::WalkDir;
 
 /// Returns true if the path exists and is a supported audio file.
@@ -17,7 +18,11 @@ pub fn is_supported_audio_file<P: AsRef<Path>>(p: P) -> bool {
 /// will be included. When it's a file, it will be included if it's audio.
 ///
 /// The returned paths will be canonicalized.
-pub fn only_audio_files(filenames: Vec<String>) -> Vec<PathBuf> {
+///
+/// # Panics
+///
+/// Panics if a path cannot be canonicalized
+pub fn only_audio(filenames: &[String]) -> Vec<PathBuf> {
     filenames
         .iter()
         .map(Path::new)
@@ -25,7 +30,7 @@ pub fn only_audio_files(filenames: Vec<String>) -> Vec<PathBuf> {
             if p.is_dir() {
                 WalkDir::new(p)
                     .into_iter()
-                    .filter_map(|e| e.ok())
+                    .filter_map(Result::ok)
                     .filter(|e| e.file_type().is_file())
                     .map(|e| e.path().to_owned())
                     .collect_vec()
@@ -34,6 +39,9 @@ pub fn only_audio_files(filenames: Vec<String>) -> Vec<PathBuf> {
             }
         })
         .filter(|p| is_supported_audio_file(p))
-        .map(|p| p.canonicalize().unwrap())
+        .map(|p| {
+            p.canonicalize()
+                .expect_or_log("Failed to canonicalize path")
+        })
         .collect_vec()
 }
