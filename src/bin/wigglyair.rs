@@ -233,6 +233,7 @@ fn build_rows(tracks: &TrackList, current_track: usize, is_paused: bool) -> Vec<
     let mut previous_album = ""; // safe initial value because album names are non-empty
     let empty_row = Row::new(vec![Cell::from(""), Cell::from("")]);
     for (i, t) in list.iter().enumerate() {
+        let is_current_track = i == current_track;
         // print the album header when the album changes
         // if it's not the first album, toss a linebreak above as well
         if t.album != previous_album {
@@ -255,7 +256,7 @@ fn build_rows(tracks: &TrackList, current_track: usize, is_paused: bool) -> Vec<
         };
 
         let title_span = {
-            let style = if i == current_track {
+            let style = if is_current_track {
                 let color = if is_paused { Color::Red } else { Color::Green };
                 Style::default().fg(color).bold()
             } else {
@@ -277,14 +278,15 @@ fn build_rows(tracks: &TrackList, current_track: usize, is_paused: bool) -> Vec<
             audio_params.sample_rate,
             tracks.get_sample_count(i),
         ));
-        let style = if i == current_track {
+        let style = if is_current_track {
             let color = if is_paused { Color::Red } else { Color::Yellow };
             Style::default().fg(color).bold()
         } else {
             Style::default().fg(Color::DarkGray)
         };
+        let sep = if is_current_track { "•" } else { "│" };
         let timecode = Cell::from(
-            Line::styled(format!("[{track_length} │ {start_point_secs}]"), style)
+            Line::styled(format!("[{track_length} {sep} {start_point_secs}]"), style)
                 .alignment(Alignment::Right),
         );
         let row = Row::new(vec![track, timecode]);
