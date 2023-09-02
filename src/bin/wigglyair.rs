@@ -287,7 +287,7 @@ fn build_rows(tracks: &TrackList, current_track: usize, is_paused: bool) -> Vec<
         let sep = if is_current_track { "•" } else { "│" };
         let timecode = Cell::from(
             Line::styled(format!("[{track_length} {sep} {start_point_secs}]"), style)
-                .alignment(Alignment::Right),
+                .alignment(Alignment::Left),
         );
         let row = Row::new(vec![track, timecode]);
         rows.push(row);

@@ -476,7 +476,7 @@ impl Player {
         let current_track = self.current_track.clone();
         let play_state = self.state.clone();
         let volume = self.volume.clone();
-        let (samples_tx, samples_rx) = channel::bounded::<Vec<f32>>(100);
+        let (samples_tx, samples_rx) = channel::bounded::<Vec<f32>>(256);
         let paths = track_list
             .tracks
             .iter()
